@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OAuth Client Registration</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<div class="max-w-3xl mx-auto py-10 px-4">
+
+  <!-- Header -->
+  <h1 class="text-2xl font-bold text-gray-800 mb-8">OAuth Client Registration</h1>
+
+  <!-- Registration Form -->
+  <div class="bg-white rounded-xl shadow p-6 mb-8">
+    <h2 class="text-lg font-semibold text-gray-700 mb-4">Register a New Client</h2>
+    <form id="registerForm" class="space-y-4">
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Tenant Name</label>
+          <input id="tenant" type="text" required placeholder="my-tenant"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Client Name</label>
+          <input id="clientName" type="text" required placeholder="My App"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">OAuth Server Base URL</label>
+        <input id="oauthServerUrl" type="url" required placeholder="https://auth.example.com/incorta"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">Admin PAT</label>
+        <input id="pat" type="password" required placeholder="Personal Access Token"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">
+          Callback URLs <span class="text-gray-400 font-normal">(one per line)</span>
+        </label>
+        <textarea id="redirectUris" rows="3" required placeholder="https://myapp.com/callback&#10;https://localhost:3000/callback"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"></textarea>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-2">Grant Types</label>
+        <div class="flex flex-wrap gap-4">
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" name="grantType" value="authorization_code" checked class="rounded" />
+            authorization_code
+          </label>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" name="grantType" value="client_credentials" class="rounded" />
+            client_credentials
+          </label>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" name="grantType" value="refresh_token" class="rounded" />
+            refresh_token
+          </label>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3 pt-2">
+        <button type="submit" id="submitBtn"
+          class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors">
+          Register Client
+        </button>
+        <span id="spinner" class="hidden text-sm text-gray-500">Registering...</span>
+      </div>
+    </form>
+
+    <!-- Error -->
+    <div id="errorBox" class="hidden mt-4 bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
+      <div id="errorMsg"></div>
+      <div id="errorTraceId" class="hidden mt-1 text-xs text-red-500 font-mono"></div>
+    </div>
+
+    <!-- Success result -->
+    <div id="resultBox" class="hidden mt-5 bg-green-50 border border-green-200 rounded-xl p-5">
+      <h3 class="text-sm font-semibold text-green-800 mb-3">Client Registered Successfully</h3>
+      <div class="space-y-2 text-sm">
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500 w-28 shrink-0">Client ID</span>
+          <code id="resClientId" class="bg-white border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all"></code>
+          <button onclick="copyText('resClientId')" class="text-xs text-blue-600 hover:underline shrink-0">Copy</button>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500 w-28 shrink-0">Client Secret</span>
+          <code id="resClientSecret" class="bg-white border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all"></code>
+          <button onclick="copyText('resClientSecret')" class="text-xs text-blue-600 hover:underline shrink-0">Copy</button>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-28 shrink-0 mt-0.5">Callback URLs</span>
+          <div id="resRedirectUris" class="flex-1 font-mono text-xs space-y-0.5"></div>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500 w-28 shrink-0">Discovery URL</span>
+          <code id="resOidcDiscoveryUrl" class="bg-white border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all"></code>
+          <button onclick="copyText('resOidcDiscoveryUrl')" class="text-xs text-blue-600 hover:underline shrink-0">Copy</button>
+        </div>
+        <div id="resTraceIdRow" class="hidden flex items-center gap-2">
+          <span class="text-gray-500 w-28 shrink-0">Trace ID</span>
+          <code id="resTraceId" class="bg-white border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all"></code>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Registered Clients List -->
+  <div class="bg-white rounded-xl shadow p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold text-gray-700">Registered Clients</h2>
+      <button onclick="loadClients()" class="text-xs text-blue-600 hover:underline">Refresh</button>
+    </div>
+    <div id="clientsEmpty" class="text-sm text-gray-400 text-center py-6">No clients registered yet.</div>
+    <div id="clientsTable" class="hidden overflow-x-auto">
+      <table class="w-full text-sm text-left">
+        <thead class="text-xs text-gray-500 uppercase border-b">
+          <tr>
+            <th class="pb-2 pr-4">Registered</th>
+            <th class="pb-2 pr-4">Tenant</th>
+            <th class="pb-2 pr-4">Client Name</th>
+            <th class="pb-2 pr-4">Client ID</th>
+            <th class="pb-2"></th>
+          </tr>
+        </thead>
+        <tbody id="clientsBody" class="divide-y divide-gray-100"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- Add Callback URL Modal -->
+<div id="addUrlModal" class="hidden fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-base font-semibold text-gray-800">Add Callback URL</h3>
+      <button onclick="closeAddUrl()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <div class="mb-4 text-sm text-gray-500">
+      Client: <span id="addUrlClientName" class="font-medium text-gray-700"></span>
+      <span class="mx-1">&middot;</span>
+      <span id="addUrlClientId" class="font-mono text-xs text-gray-500"></span>
+    </div>
+    <div class="space-y-3">
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">New Callback URL</label>
+        <input id="addUrlInput" type="url" required placeholder="https://myapp.com/new-callback"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 font-mono" />
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">Admin PAT</label>
+        <input id="addUrlPat" type="password" required placeholder="Personal Access Token"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500" />
+      </div>
+    </div>
+    <div id="addUrlError" class="hidden mt-3 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+      <div id="addUrlErrorMsg"></div>
+      <div id="addUrlErrorTraceId" class="hidden mt-1 text-xs text-red-500 font-mono"></div>
+    </div>
+    <div class="flex items-center gap-3 mt-5">
+      <button onclick="submitAddUrl()"
+        class="bg-green-600 hover:bg-green-700 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors">
+        Update Client
+      </button>
+      <span id="addUrlSpinner" class="hidden text-sm text-gray-500">Updating...</span>
+    </div>
+  </div>
+</div>
+
+<!-- Detail Modal -->
+<div id="modal" class="hidden fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-base font-semibold text-gray-800">Client Details</h3>
+      <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <div id="modalContent" class="space-y-3 text-sm"></div>
+  </div>
+</div>
+
+<script>
+  async function loadClients() {
+    const resp = await fetch('/api/clients');
+    const clients = await resp.json();
+    const empty = document.getElementById('clientsEmpty');
+    const table = document.getElementById('clientsTable');
+    const body = document.getElementById('clientsBody');
+
+    if (!clients.length) {
+      empty.classList.remove('hidden');
+      table.classList.add('hidden');
+      return;
+    }
+
+    empty.classList.add('hidden');
+    table.classList.remove('hidden');
+    body.innerHTML = clients.slice().reverse().map(c => `
+      <tr class="hover:bg-gray-50">
+        <td class="py-2 pr-4 text-gray-500 whitespace-nowrap">${formatDate(c.registered_at)}</td>
+        <td class="py-2 pr-4 font-medium">${esc(c.tenant)}</td>
+        <td class="py-2 pr-4">${esc(c.client_name)}</td>
+        <td class="py-2 pr-4 font-mono text-xs text-gray-600 truncate max-w-[160px]">${esc(c.client_id)}</td>
+        <td class="py-2 text-right space-x-3">
+          <button onclick='showDetail(${JSON.stringify(c)})' class="text-blue-600 hover:underline text-xs">Details</button>
+          <button onclick='openAddUrl(${JSON.stringify(c)})' class="text-green-600 hover:underline text-xs">Add URL</button>
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  function formatDate(iso) {
+    return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  }
+
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function showDetail(c) {
+    const fields = [
+      ['Registered', formatDate(c.registered_at)],
+      ['Tenant', c.tenant],
+      ['Client Name', c.client_name],
+      ['OAuth Server', c.oauth_server_url],
+      ['Client ID', c.client_id],
+      ['Client Secret', c.client_secret ?? '(none)'],
+      ['Callback URLs', (c.redirect_uris || []).join('\n')],
+      ['Grant Types', (c.grant_types || []).join(', ')],
+      ['Discovery URL', c.oidc_discovery_url ?? ''],
+    ];
+    document.getElementById('modalContent').innerHTML = fields.map(([label, value]) => `
+      <div class="flex items-start gap-3">
+        <span class="text-gray-400 w-28 shrink-0 pt-0.5">${label}</span>
+        <span class="font-mono text-xs bg-gray-50 rounded px-2 py-1 flex-1 break-all whitespace-pre-wrap">${esc(value)}</span>
+      </div>
+    `).join('');
+    document.getElementById('modal').classList.remove('hidden');
+  }
+
+  function closeModal() {
+    document.getElementById('modal').classList.add('hidden');
+  }
+
+  document.getElementById('modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeModal();
+  });
+
+  document.getElementById('registerForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = document.getElementById('submitBtn');
+    const spinner = document.getElementById('spinner');
+    const errorBox = document.getElementById('errorBox');
+    const resultBox = document.getElementById('resultBox');
+
+    errorBox.classList.add('hidden');
+    resultBox.classList.add('hidden');
+    btn.disabled = true;
+    spinner.classList.remove('hidden');
+
+    const redirectUris = document.getElementById('redirectUris').value
+      .split('\n').map(s => s.trim()).filter(Boolean);
+    const grantTypes = [...document.querySelectorAll('input[name="grantType"]:checked')]
+      .map(el => el.value);
+
+    try {
+      const resp = await fetch('/api/clients', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenant: document.getElementById('tenant').value.trim(),
+          oauth_server_url: document.getElementById('oauthServerUrl').value.trim(),
+          pat: document.getElementById('pat').value,
+          client_name: document.getElementById('clientName').value.trim(),
+          redirect_uris: redirectUris,
+          grant_types: grantTypes,
+        }),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        const detail = data.detail;
+        const msg = (typeof detail === 'object' ? detail?.message : detail) || 'Registration failed.';
+        const traceId = typeof detail === 'object' ? detail?.trace_id : null;
+        document.getElementById('errorMsg').textContent = msg;
+        const traceEl = document.getElementById('errorTraceId');
+        if (traceId) {
+          traceEl.textContent = 'Trace ID: ' + traceId;
+          traceEl.classList.remove('hidden');
+        } else {
+          traceEl.classList.add('hidden');
+        }
+        errorBox.classList.remove('hidden');
+      } else {
+        document.getElementById('resClientId').textContent = data.client_id;
+        document.getElementById('resClientSecret').textContent = data.client_secret ?? '(none)';
+        document.getElementById('resRedirectUris').innerHTML =
+          (data.redirect_uris || []).map(u => `<div>${esc(u)}</div>`).join('');
+        document.getElementById('resOidcDiscoveryUrl').textContent = data.oidc_discovery_url ?? '';
+        const traceIdRow = document.getElementById('resTraceIdRow');
+        if (data.trace_id) {
+          document.getElementById('resTraceId').textContent = data.trace_id;
+          traceIdRow.classList.remove('hidden');
+        } else {
+          traceIdRow.classList.add('hidden');
+        }
+        resultBox.classList.remove('hidden');
+        loadClients();
+      }
+    } catch (err) {
+      document.getElementById('errorMsg').textContent = 'Network error: ' + err.message;
+      document.getElementById('errorTraceId').classList.add('hidden');
+      errorBox.classList.remove('hidden');
+    } finally {
+      btn.disabled = false;
+      spinner.classList.add('hidden');
+    }
+  });
+
+  function copyText(id) {
+    navigator.clipboard.writeText(document.getElementById(id).textContent);
+  }
+
+  let _addUrlClientId = null;
+
+  function openAddUrl(c) {
+    _addUrlClientId = c.client_id;
+    document.getElementById('addUrlClientName').textContent = c.client_name;
+    document.getElementById('addUrlClientId').textContent = c.client_id;
+    document.getElementById('addUrlInput').value = '';
+    document.getElementById('addUrlPat').value = '';
+    document.getElementById('addUrlError').classList.add('hidden');
+    document.getElementById('addUrlModal').classList.remove('hidden');
+  }
+
+  function closeAddUrl() {
+    document.getElementById('addUrlModal').classList.add('hidden');
+  }
+
+  document.getElementById('addUrlModal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeAddUrl();
+  });
+
+  async function submitAddUrl() {
+    const newUrl = document.getElementById('addUrlInput').value.trim();
+    const pat = document.getElementById('addUrlPat').value;
+    const errorBox = document.getElementById('addUrlError');
+    const spinner = document.getElementById('addUrlSpinner');
+
+    if (!newUrl || !pat) return;
+
+    errorBox.classList.add('hidden');
+    spinner.classList.remove('hidden');
+
+    try {
+      const resp = await fetch(`/api/clients/${encodeURIComponent(_addUrlClientId)}/redirect-uris`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pat, new_redirect_uri: newUrl }),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        const detail = data.detail;
+        const msg = (typeof detail === 'object' ? detail?.message : detail) || 'Update failed.';
+        const traceId = typeof detail === 'object' ? detail?.trace_id : null;
+        document.getElementById('addUrlErrorMsg').textContent = msg;
+        const traceEl = document.getElementById('addUrlErrorTraceId');
+        if (traceId) {
+          traceEl.textContent = 'Trace ID: ' + traceId;
+          traceEl.classList.remove('hidden');
+        } else {
+          traceEl.classList.add('hidden');
+        }
+        errorBox.classList.remove('hidden');
+      } else {
+        closeAddUrl();
+        loadClients();
+      }
+    } catch (err) {
+      document.getElementById('addUrlErrorMsg').textContent = 'Network error: ' + err.message;
+      document.getElementById('addUrlErrorTraceId').classList.add('hidden');
+      errorBox.classList.remove('hidden');
+    } finally {
+      spinner.classList.add('hidden');
+    }
+  }
+
+  loadClients();
+</script>
+</body>
+</html>

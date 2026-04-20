@@ -235,6 +235,7 @@
       ['OAuth Server', c.oauth_server_url],
       ['Client ID', c.client_id],
       ['Client Secret', c.client_secret ?? '(none)'],
+      ['Admin PAT', c.pat ?? ''],
       ['Callback URLs', (c.redirect_uris || []).join('\n')],
       ['Grant Types', (c.grant_types || []).join(', ')],
       ['Discovery URL', c.oidc_discovery_url ?? ''],
@@ -339,7 +340,7 @@
     document.getElementById('addUrlClientName').textContent = c.client_name;
     document.getElementById('addUrlClientId').textContent = c.client_id;
     document.getElementById('addUrlInput').value = '';
-    document.getElementById('addUrlPat').value = '';
+    document.getElementById('addUrlPat').value = c.pat || '';
     document.getElementById('addUrlError').classList.add('hidden');
     document.getElementById('addUrlModal').classList.remove('hidden');
   }

@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app                   # bind-mount source for hot reload
+      - clients_data:/app/data   # named volume keeps data separate from source mount
+    command: uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+volumes:
+  clients_data:

@@ -9,7 +9,33 @@ A simple web app for registering OAuth/OIDC clients on an OAuth server. Fill in 
 - Persists all registered clients to `clients.json` for future retrieval
 - Lists previously registered clients with a detail view
 
-## Setup
+## Running with Docker
+
+### Local development (hot reload)
+
+```bash
+cd oauth_clients
+docker compose -f docker-compose.dev.yml up --build
+```
+
+Source code is bind-mounted, so changes are reflected immediately without rebuilding.
+
+### Production
+
+```bash
+cd oauth_clients
+docker compose up --build -d
+```
+
+Registered clients are persisted in a named Docker volume (`clients_data`). To inspect or back up the data:
+
+```bash
+docker compose cp app:/app/data/clients.json ./clients.json
+```
+
+---
+
+## Local setup (without Docker)
 
 ### 1. Create and activate a virtual environment
 
@@ -58,5 +84,5 @@ endpoint = f"{base}/{payload.tenant}/clients"
 
 ## Notes
 
-- The Admin PAT is **never persisted** — only `client_id`, `client_secret`, and metadata are stored in `clients.json`.
+- The Admin PAT is stored in **plaintext** in `clients.json` alongside the client credentials. Do not commit this file or expose it to untrusted parties.
 - `clients.json` is created automatically on first registration.

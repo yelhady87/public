@@ -117,6 +117,7 @@ async def register_client(payload: RegisterClientRequest):
         {
             "tenant": payload.tenant,
             "oauth_server_url": payload.oauth_server_url,
+            "pat": payload.pat,
             "client_name": payload.client_name,
             "client_id": client_id,
             "client_secret": client_secret,
@@ -202,7 +203,7 @@ async def add_redirect_uri(client_id: str, payload: AddRedirectUriRequest):
             },
         )
 
-    updated = update_client_redirect_uris(client_id, merged)
+    updated = update_client_redirect_uris(client_id, merged, payload.pat)
     logger.info("Redirect URIs updated locally for client_id=%s trace_id=%s", client_id, trace_id)
     updated["trace_id"] = trace_id
     return updated

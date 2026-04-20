@@ -4,3 +4,5 @@ oauth_clients/.claude/**
 
 oauth_clients/__pycache__
 oauth_clients/clients.json
+
+.idea

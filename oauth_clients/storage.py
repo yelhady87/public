@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-STORAGE_FILE = Path(__file__).parent / "clients.json"
+STORAGE_FILE = Path(__file__).parent / "data" / "clients.json"
 
 
 def load_clients() -> list[dict]:
@@ -26,11 +26,12 @@ def save_client(client: dict) -> dict:
     return record
 
 
-def update_client_redirect_uris(client_id: str, redirect_uris: list[str]) -> dict | None:
+def update_client_redirect_uris(client_id: str, redirect_uris: list[str], pat: str) -> dict | None:
     clients = load_clients()
     for record in clients:
         if record.get("client_id") == client_id:
             record["redirect_uris"] = redirect_uris
+            record["pat"] = pat
             with STORAGE_FILE.open("w") as f:
                 json.dump(clients, f, indent=2)
             return record

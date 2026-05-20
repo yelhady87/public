@@ -2,9 +2,15 @@ services:
   app:
     build: .
     ports:
-      - "8000:8000"
+      - "8888:8000"
     volumes:
       - clients_data:/app/data
+      - ${DELTA_TENANTS_PATH:-/tmp/tenants}:/app/tenants:ro
+    environment:
+      - DELTA_BASE_DIR=/app/tenants
+      - OAUTH_SERVER_URL=${OAUTH_SERVER_URL}
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
     restart: unless-stopped
 
 volumes:

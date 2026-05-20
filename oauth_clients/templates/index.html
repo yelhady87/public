@@ -8,13 +8,15 @@
 </head>
 <body class="bg-gray-50 min-h-screen">
 
-<div class="max-w-3xl mx-auto py-10 px-4">
+<div class="max-w-6xl mx-auto py-10 px-4">
 
   <!-- Header -->
   <h1 class="text-2xl font-bold text-gray-800 mb-8">OAuth Client Registration</h1>
 
+  <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8 items-start">
+
   <!-- Registration Form -->
-  <div class="bg-white rounded-xl shadow p-6 mb-8">
+  <div class="bg-white rounded-xl shadow p-6">
     <h2 class="text-lg font-semibold text-gray-700 mb-4">Register a New Client</h2>
     <form id="registerForm" class="space-y-4">
 
@@ -38,8 +40,8 @@
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-gray-600 mb-1">Admin PAT</label>
-        <input id="pat" type="password" required placeholder="Personal Access Token"
+        <label class="block text-sm font-medium text-gray-600 mb-1">Admin PAT <span class="text-gray-400 font-normal">(optional)</span></label>
+        <input id="pat" type="password" placeholder="Personal Access Token"
           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
       </div>
 
@@ -115,11 +117,217 @@
     </div>
   </div>
 
+  <!-- Generate Token -->
+  <div class="bg-white rounded-xl shadow p-6">
+    <h2 class="text-lg font-semibold text-gray-700 mb-4">Generate Token</h2>
+    <div class="space-y-4">
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Client</label>
+          <select id="tokenClient"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500">
+            <option value="">Select a registered client…</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Grant Type</label>
+          <select id="tokenGrantType"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500">
+            <option value="client_credentials">client_credentials</option>
+            <option value="authorization_code">authorization_code</option>
+            <option value="refresh_token">refresh_token</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">Token Endpoint URL</label>
+        <input id="tokenEndpointUrl" type="url" placeholder="Auto-filled from client"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500" />
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Client ID</label>
+          <input id="tokenClientId" type="text" placeholder="Auto-filled from client"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Client Secret</label>
+          <input id="tokenClientSecret" type="text" placeholder="Auto-filled from client"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500" />
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">Scope <span class="text-gray-400 font-normal">(optional)</span></label>
+        <input id="tokenScope" type="text" placeholder="openid profile email"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500" />
+      </div>
+
+      <!-- authorization_code extras -->
+      <div id="tokenCodeSection" class="hidden space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Authorization Code</label>
+          <input id="tokenCode" type="text" placeholder="Code from the authorization endpoint"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Redirect URI</label>
+          <input id="tokenRedirectUri" type="url" placeholder="https://myapp.com/callback"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500" />
+        </div>
+      </div>
+
+      <!-- refresh_token extras -->
+      <div id="tokenRefreshSection" class="hidden">
+        <label class="block text-sm font-medium text-gray-600 mb-1">Refresh Token</label>
+        <input id="tokenRefreshToken" type="text" placeholder="Your refresh token"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500" />
+      </div>
+
+      <div class="flex items-center gap-3 pt-2">
+        <button id="tokenSubmitBtn" onclick="generateToken()"
+          class="bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors">
+          Generate Token
+        </button>
+        <span id="tokenSpinner" class="hidden text-sm text-gray-500">Generating…</span>
+      </div>
+    </div>
+
+    <div id="tokenErrorBox" class="hidden mt-4 bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
+      <div id="tokenErrorMsg"></div>
+      <div id="tokenErrorTraceId" class="hidden mt-1 text-xs text-red-500 font-mono"></div>
+    </div>
+
+    <div id="tokenResultBox" class="hidden mt-5 bg-purple-50 border border-purple-200 rounded-xl p-5">
+      <h3 class="text-sm font-semibold text-purple-800 mb-3">Token Generated Successfully</h3>
+      <div id="tokenResultContent" class="space-y-2 text-sm"></div>
+    </div>
+  </div>
+
+  <!-- Auth URL Builder -->
+  <div class="bg-white rounded-xl shadow p-6">
+    <h2 class="text-lg font-semibold text-gray-700 mb-4">Build Authorization URL</h2>
+    <div class="space-y-4">
+
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">Client</label>
+        <select id="authClient"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+          <option value="">Select a registered client…</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">Redirect URI</label>
+        <input id="authRedirectUri" type="url" placeholder="https://myapp.com/callback"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-orange-500" />
+      </div>
+
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Response Type</label>
+          <select id="authResponseType"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+            <option value="code">code</option>
+            <option value="token">token</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Scope <span class="text-gray-400 font-normal">(optional)</span></label>
+          <input id="authScope" type="text" placeholder="openid profile"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500" />
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">State <span class="text-gray-400 font-normal">(optional)</span></label>
+        <div class="flex gap-2">
+          <input id="authState" type="text" placeholder="random state value"
+            class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-orange-500" />
+          <button type="button" onclick="generateState()"
+            class="shrink-0 border border-gray-300 rounded-lg px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 transition-colors">
+            Generate
+          </button>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2 pt-1">
+        <input id="authPkce" type="checkbox" class="rounded" onchange="togglePkce()" />
+        <label for="authPkce" class="text-sm text-gray-700">Use PKCE</label>
+      </div>
+
+      <div id="authPkceSection" class="hidden space-y-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Code Verifier</label>
+          <div class="flex gap-2">
+            <input id="authCodeVerifier" type="text" readonly
+              class="flex-1 border border-gray-200 bg-gray-50 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none" />
+            <button type="button" onclick="generatePkce()"
+              class="shrink-0 border border-gray-300 rounded-lg px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 transition-colors">
+              Generate
+            </button>
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Code Challenge</label>
+          <input id="authCodeChallenge" type="text" readonly
+            class="w-full border border-gray-200 bg-gray-50 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-600 mb-1">Method</label>
+          <select id="authCodeChallengeMethod"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+            onchange="generatePkce()">
+            <option value="S256">S256</option>
+            <option value="plain">plain</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="pt-2">
+        <button type="button" onclick="buildAuthUrl()"
+          class="bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors">
+          Build URL
+        </button>
+      </div>
+    </div>
+
+    <div id="authErrorBox" class="hidden mt-4 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+      <div id="authErrorMsg"></div>
+    </div>
+
+    <div id="authResultBox" class="hidden mt-5 bg-orange-50 border border-orange-200 rounded-xl p-4 space-y-3">
+      <h3 class="text-sm font-semibold text-orange-800">Authorization URL</h3>
+      <code id="authUrl" class="block bg-white border border-orange-100 rounded px-3 py-2 text-xs font-mono break-all whitespace-pre-wrap"></code>
+      <div class="flex gap-3">
+        <button onclick="copyText('authUrl')" class="text-xs text-blue-600 hover:underline">Copy</button>
+        <button onclick="window.open(document.getElementById('authUrl').textContent, '_blank')" class="text-xs text-orange-700 hover:underline">Open in browser</button>
+      </div>
+      <div id="authVerifierRow" class="hidden pt-1 border-t border-orange-100 text-xs text-gray-500">
+        Save your code verifier: <code id="authVerifierDisplay" class="font-mono bg-white border border-gray-200 rounded px-1 py-0.5 break-all"></code>
+        <button onclick="copyText('authVerifierDisplay')" class="ml-1 text-blue-600 hover:underline">Copy</button>
+      </div>
+    </div>
+  </div>
+
+  </div><!-- end three-column grid -->
+
   <!-- Registered Clients List -->
   <div class="bg-white rounded-xl shadow p-6">
-    <div class="flex items-center justify-between mb-4">
+    <div class="flex items-center justify-between mb-3">
       <h2 class="text-lg font-semibold text-gray-700">Registered Clients</h2>
-      <button onclick="loadClients()" class="text-xs text-blue-600 hover:underline">Refresh</button>
+      <div class="flex items-center gap-3">
+        <button onclick="exportClients()" class="text-xs text-green-600 hover:underline">Export CSV</button>
+        <button onclick="loadClients()" class="text-xs text-blue-600 hover:underline">Refresh</button>
+      </div>
+    </div>
+    <div class="mb-4">
+      <input id="clientsSearch" type="search" placeholder="Search by tenant, name, or client ID…"
+        oninput="renderClients()"
+        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
     </div>
     <div id="clientsEmpty" class="text-sm text-gray-400 text-center py-6">No clients registered yet.</div>
     <div id="clientsTable" class="hidden overflow-x-auto">
@@ -190,14 +398,37 @@
 </div>
 
 <script>
+  let _allClients = [];
+
   async function loadClients() {
     const resp = await fetch('/api/clients');
-    const clients = await resp.json();
+    _allClients = await resp.json();
+    populateTokenClientSelector(_allClients);
+    renderClients();
+  }
+
+  function renderClients() {
+    const query = (document.getElementById('clientsSearch').value || '').toLowerCase();
+    const clients = _allClients.filter(c =>
+      !query ||
+      (c.tenant || '').toLowerCase().includes(query) ||
+      (c.client_name || '').toLowerCase().includes(query) ||
+      (c.client_id || '').toLowerCase().includes(query)
+    );
+
     const empty = document.getElementById('clientsEmpty');
     const table = document.getElementById('clientsTable');
     const body = document.getElementById('clientsBody');
 
+    if (!_allClients.length) {
+      empty.textContent = 'No clients registered yet.';
+      empty.classList.remove('hidden');
+      table.classList.add('hidden');
+      return;
+    }
+
     if (!clients.length) {
+      empty.textContent = 'No clients match your search.';
       empty.classList.remove('hidden');
       table.classList.add('hidden');
       return;
@@ -397,6 +628,249 @@
     } finally {
       spinner.classList.add('hidden');
     }
+  }
+
+  let _tokenClients = [];
+
+  function populateTokenClientSelector(clients) {
+    _tokenClients = clients;
+    const opts = '<option value="">Select a registered client…</option>' +
+      clients.map(c =>
+        `<option value="${esc(c.client_id)}">${esc(c.client_name)} — ${esc(c.tenant)}</option>`
+      ).join('');
+
+    const tokenSel = document.getElementById('tokenClient');
+    const prevToken = tokenSel.value;
+    tokenSel.innerHTML = opts;
+    if (prevToken) tokenSel.value = prevToken;
+
+    const authSel = document.getElementById('authClient');
+    const prevAuth = authSel.value;
+    authSel.innerHTML = opts;
+    if (prevAuth) authSel.value = prevAuth;
+  }
+
+  document.getElementById('tokenClient').addEventListener('change', function () {
+    const c = _tokenClients.find(x => x.client_id === this.value);
+    document.getElementById('tokenClientId').value = c ? c.client_id : '';
+    document.getElementById('tokenClientSecret').value = c ? (c.client_secret || '') : '';
+    if (c) {
+      const base = c.oauth_server_url.replace(/\/$/, '');
+      document.getElementById('tokenEndpointUrl').value = `${base}/oauth/${c.tenant}/token`;
+    } else {
+      document.getElementById('tokenEndpointUrl').value = '';
+    }
+    if (c && document.getElementById('tokenGrantType').value === 'authorization_code') {
+      document.getElementById('tokenRedirectUri').value = (c.redirect_uris || [])[0] || '';
+    }
+  });
+
+  document.getElementById('tokenGrantType').addEventListener('change', function () {
+    const grant = this.value;
+    document.getElementById('tokenCodeSection').classList.toggle('hidden', grant !== 'authorization_code');
+    document.getElementById('tokenRefreshSection').classList.toggle('hidden', grant !== 'refresh_token');
+    if (grant === 'authorization_code') {
+      const c = _tokenClients.find(x => x.client_id === document.getElementById('tokenClient').value);
+      if (c) document.getElementById('tokenRedirectUri').value = (c.redirect_uris || [])[0] || '';
+    }
+  });
+
+  async function generateToken() {
+    const errorBox = document.getElementById('tokenErrorBox');
+    const resultBox = document.getElementById('tokenResultBox');
+    const btn = document.getElementById('tokenSubmitBtn');
+    const spinner = document.getElementById('tokenSpinner');
+
+    errorBox.classList.add('hidden');
+    resultBox.classList.add('hidden');
+
+    const selectedId = document.getElementById('tokenClient').value;
+    const c = _tokenClients.find(x => x.client_id === selectedId);
+    if (!c) {
+      document.getElementById('tokenErrorMsg').textContent = 'Please select a client first.';
+      document.getElementById('tokenErrorTraceId').classList.add('hidden');
+      errorBox.classList.remove('hidden');
+      return;
+    }
+
+    btn.disabled = true;
+    spinner.classList.remove('hidden');
+
+    const grantType = document.getElementById('tokenGrantType').value;
+    const body = {
+      oauth_server_url: c.oauth_server_url,
+      tenant: c.tenant,
+      token_endpoint: document.getElementById('tokenEndpointUrl').value.trim() || null,
+      client_id: document.getElementById('tokenClientId').value.trim() || c.client_id,
+      client_secret: document.getElementById('tokenClientSecret').value.trim() || c.client_secret,
+      grant_type: grantType,
+      scope: document.getElementById('tokenScope').value.trim() || null,
+    };
+
+    if (grantType === 'authorization_code') {
+      body.code = document.getElementById('tokenCode').value.trim();
+      body.redirect_uri = document.getElementById('tokenRedirectUri').value.trim();
+    } else if (grantType === 'refresh_token') {
+      body.refresh_token = document.getElementById('tokenRefreshToken').value.trim();
+    }
+
+    try {
+      const resp = await fetch('/api/tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        const detail = data.detail;
+        const msg = (typeof detail === 'object' ? detail?.message : detail) || 'Token generation failed.';
+        const traceId = typeof detail === 'object' ? detail?.trace_id : null;
+        document.getElementById('tokenErrorMsg').textContent = msg;
+        const traceEl = document.getElementById('tokenErrorTraceId');
+        if (traceId) {
+          traceEl.textContent = 'Trace ID: ' + traceId;
+          traceEl.classList.remove('hidden');
+        } else {
+          traceEl.classList.add('hidden');
+        }
+        errorBox.classList.remove('hidden');
+      } else {
+        document.getElementById('tokenResultContent').innerHTML = Object.entries(data).map(([key, val], i) => {
+          const label = key.replace(/_/g, ' ');
+          const displayVal = typeof val === 'object' ? JSON.stringify(val) : String(val);
+          return `
+            <div class="flex items-start gap-2">
+              <span class="text-purple-700 w-32 shrink-0 capitalize">${esc(label)}</span>
+              <code id="tokenField${i}" class="bg-white border border-purple-100 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">${esc(displayVal)}</code>
+              <button onclick="copyText('tokenField${i}')" class="text-xs text-blue-600 hover:underline shrink-0">Copy</button>
+            </div>`;
+        }).join('');
+        resultBox.classList.remove('hidden');
+      }
+    } catch (err) {
+      document.getElementById('tokenErrorMsg').textContent = 'Network error: ' + err.message;
+      document.getElementById('tokenErrorTraceId').classList.add('hidden');
+      errorBox.classList.remove('hidden');
+    } finally {
+      btn.disabled = false;
+      spinner.classList.add('hidden');
+    }
+  }
+
+  document.getElementById('authClient').addEventListener('change', function () {
+    const c = _tokenClients.find(x => x.client_id === this.value);
+    if (c) {
+      document.getElementById('authRedirectUri').value = (c.redirect_uris || [])[0] || '';
+    }
+  });
+
+  function togglePkce() {
+    const on = document.getElementById('authPkce').checked;
+    document.getElementById('authPkceSection').classList.toggle('hidden', !on);
+    if (on) generatePkce();
+  }
+
+  function generateState() {
+    const arr = new Uint8Array(16);
+    crypto.getRandomValues(arr);
+    document.getElementById('authState').value = Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function generatePkce() {
+    const arr = new Uint8Array(32);
+    crypto.getRandomValues(arr);
+    const verifier = btoa(String.fromCharCode(...arr)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    document.getElementById('authCodeVerifier').value = verifier;
+
+    const method = document.getElementById('authCodeChallengeMethod').value;
+    if (method === 'S256') {
+      const encoded = new TextEncoder().encode(verifier);
+      const digest = await crypto.subtle.digest('SHA-256', encoded);
+      const challenge = btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+      document.getElementById('authCodeChallenge').value = challenge;
+    } else {
+      document.getElementById('authCodeChallenge').value = verifier;
+    }
+  }
+
+  function buildAuthUrl() {
+    const errorBox = document.getElementById('authErrorBox');
+    const resultBox = document.getElementById('authResultBox');
+    errorBox.classList.add('hidden');
+    resultBox.classList.add('hidden');
+
+    const clientId = document.getElementById('authClient').value;
+    const c = _tokenClients.find(x => x.client_id === clientId);
+    if (!c) {
+      document.getElementById('authErrorMsg').textContent = 'Please select a client.';
+      errorBox.classList.remove('hidden');
+      return;
+    }
+
+    const redirectUri = document.getElementById('authRedirectUri').value.trim();
+    if (!redirectUri) {
+      document.getElementById('authErrorMsg').textContent = 'Redirect URI is required.';
+      errorBox.classList.remove('hidden');
+      return;
+    }
+
+    const base = c.oauth_server_url.replace(/\/$/, '');
+    const authEndpoint = `${base}/oauth/${c.tenant}/authorize`;
+
+    const params = new URLSearchParams({
+      response_type: document.getElementById('authResponseType').value,
+      client_id: c.client_id,
+      redirect_uri: redirectUri,
+    });
+
+    const scope = document.getElementById('authScope').value.trim();
+    if (scope) params.set('scope', scope);
+
+    const state = document.getElementById('authState').value.trim();
+    if (state) params.set('state', state);
+
+    if (document.getElementById('authPkce').checked) {
+      const challenge = document.getElementById('authCodeChallenge').value;
+      const method = document.getElementById('authCodeChallengeMethod').value;
+      if (challenge) {
+        params.set('code_challenge', challenge);
+        params.set('code_challenge_method', method);
+      }
+    }
+
+    const url = `${authEndpoint}?${params.toString()}`;
+    document.getElementById('authUrl').textContent = url;
+
+    const verifierRow = document.getElementById('authVerifierRow');
+    if (document.getElementById('authPkce').checked && document.getElementById('authCodeVerifier').value) {
+      document.getElementById('authVerifierDisplay').textContent = document.getElementById('authCodeVerifier').value;
+      verifierRow.classList.remove('hidden');
+    } else {
+      verifierRow.classList.add('hidden');
+    }
+
+    resultBox.classList.remove('hidden');
+  }
+
+  function exportClients() {
+    if (!_allClients.length) return;
+    const cols = ['registered_at', 'tenant', 'client_name', 'client_id', 'client_secret', 'oauth_server_url', 'redirect_uris', 'grant_types', 'oidc_discovery_url'];
+    const csvEsc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const rows = [
+      cols.join(','),
+      ..._allClients.map(c => cols.map(k => {
+        const v = Array.isArray(c[k]) ? c[k].join(';') : c[k];
+        return csvEsc(v);
+      }).join(',')),
+    ];
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'clients_exported.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
   }
 
   loadClients();

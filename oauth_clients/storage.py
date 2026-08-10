@@ -41,3 +41,45 @@ def update_client_redirect_uris(
                 json.dump(clients, f, indent=2)
             return record
     return None
+
+
+def import_clients(records: list[dict]) -> dict:
+    if not records:
+        return {"imported": [], "skipped": []}
+
+    clients = load_clients()
+    existing_client_ids = {c.get("client_id") for c in clients}
+    used_ids = {c.get("id") for c in clients}
+
+    imported: list[dict] = []
+    skipped: list[dict] = []
+
+    for rec in records:
+        client_id = rec.get("client_id")
+        client_name = rec.get("client_name")
+        if client_id and client_id in existing_client_ids:
+            skipped.append({
+                "client_id": client_id,
+                "client_name": client_name,
+                "reason": "duplicate client_id",
+            })
+            continue
+
+        record_id = rec.get("id")
+        if not record_id or record_id in used_ids:
+            record_id = str(uuid.uuid4())
+        used_ids.add(record_id)
+
+        if not rec.get("registered_at"):
+            rec["registered_at"] = datetime.now(timezone.utc).isoformat()
+
+        rec["id"] = record_id
+        clients.append(rec)
+        if client_id:
+            existing_client_ids.add(client_id)
+        imported.append(rec)
+
+    with STORAGE_FILE.open("w") as f:
+        json.dump(clients, f, indent=2)
+
+    return {"imported": imported, "skipped": skipped}

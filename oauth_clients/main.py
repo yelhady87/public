@@ -5,18 +5,25 @@
 #   uvicorn main:app --reload
 #   Open http://localhost:8000
 
+import csv
+import io
 import logging
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.requests import Request
 
 from delta_proxy import router as delta_router
-from storage import load_clients, save_client, update_client_redirect_uris
+from storage import (
+    load_clients,
+    save_client,
+    update_client_redirect_uris,
+    import_clients as bulk_import_clients,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,6 +145,83 @@ async def register_client(payload: RegisterClientRequest):
 @app.get("/api/clients")
 async def list_clients():
     return load_clients()
+
+
+IMPORT_REQUIRED_COLUMNS = [
+    "tenant", "oauth_server_url", "pat", "client_name", "client_id",
+    "client_secret", "registration_access_token", "registration_client_uri",
+    "redirect_uris", "grant_types", "oidc_discovery_url", "registered_at",
+]
+
+
+@app.post("/api/clients/import")
+async def import_clients(file: UploadFile):
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": f"CSV file is not valid UTF-8: {exc}", "trace_id": None},
+        )
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "CSV file is empty or has no header row", "trace_id": None},
+        )
+
+    missing = [c for c in IMPORT_REQUIRED_COLUMNS if c not in reader.fieldnames]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"CSV missing required columns: {', '.join(missing)}",
+                "missing": missing,
+                "trace_id": None,
+            },
+        )
+
+    def split_semi(value: str | None) -> list[str]:
+        return [s.strip() for s in (value or "").split(";") if s.strip()]
+
+    def nullable(value: str | None) -> str | None:
+        v = (value or "").strip()
+        return v or None
+
+    def text(value: str | None) -> str:
+        return (value or "").strip()
+
+    parsed: list[dict] = []
+    for row in reader:
+        parsed.append({
+            "id": nullable(row.get("id")),
+            "registered_at": text(row.get("registered_at")),
+            "tenant": text(row.get("tenant")),
+            "oauth_server_url": text(row.get("oauth_server_url")),
+            "pat": nullable(row.get("pat")),
+            "client_name": text(row.get("client_name")),
+            "client_id": text(row.get("client_id")),
+            "client_secret": nullable(row.get("client_secret")),
+            "registration_access_token": nullable(row.get("registration_access_token")),
+            "registration_client_uri": nullable(row.get("registration_client_uri")),
+            "redirect_uris": split_semi(row.get("redirect_uris")),
+            "grant_types": split_semi(row.get("grant_types")),
+            "oidc_discovery_url": nullable(row.get("oidc_discovery_url")),
+        })
+
+    logger.info("Importing %d client rows from CSV upload", len(parsed))
+    result = bulk_import_clients(parsed)
+    logger.info(
+        "Import complete: imported=%d skipped=%d",
+        len(result["imported"]), len(result["skipped"]),
+    )
+    return {
+        "imported_count": len(result["imported"]),
+        "skipped_count": len(result["skipped"]),
+        "skipped": result["skipped"],
+    }
 
 
 @app.get("/api/clients/{record_id}")

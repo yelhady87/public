@@ -26,12 +26,17 @@ def save_client(client: dict) -> dict:
     return record
 
 
-def update_client_redirect_uris(client_id: str, redirect_uris: list[str], pat: str) -> dict | None:
+def update_client_redirect_uris(
+    client_id: str,
+    redirect_uris: list[str],
+    registration_access_token: str | None = None,
+) -> dict | None:
     clients = load_clients()
     for record in clients:
         if record.get("client_id") == client_id:
             record["redirect_uris"] = redirect_uris
-            record["pat"] = pat
+            if registration_access_token:
+                record["registration_access_token"] = registration_access_token
             with STORAGE_FILE.open("w") as f:
                 json.dump(clients, f, indent=2)
             return record

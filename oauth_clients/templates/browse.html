@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Browse OAuth Clients</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<div class="max-w-6xl mx-auto py-10 px-4">
+
+  <!-- Header -->
+  <div class="flex items-center gap-4 mb-8">
+    <a href="/" class="text-sm text-blue-600 hover:underline">&larr; Back</a>
+    <h1 class="text-2xl font-bold text-gray-800">Browse OAuth Clients</h1>
+  </div>
+
+  <!-- Query Form -->
+  <div class="bg-white rounded-xl shadow p-6 mb-6 max-w-xl">
+    <h2 class="text-lg font-semibold text-gray-700 mb-4">Query Auth Server</h2>
+    <form id="browseForm" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">OAuth Server Base URL</label>
+        <input id="oauthServerUrl" type="url" required placeholder="https://auth.example.com/incorta"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">Tenant</label>
+        <input id="tenant" type="text" required placeholder="my-tenant"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-600 mb-1">Personal Access Token</label>
+        <input id="pat" type="password" required placeholder="Bearer token"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+      </div>
+      <div class="flex items-center gap-3 pt-1">
+        <button type="submit" id="submitBtn"
+          class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors">
+          Fetch Clients
+        </button>
+        <span id="spinner" class="hidden text-sm text-gray-500">Fetching...</span>
+      </div>
+    </form>
+
+    <div id="errorBox" class="hidden mt-4 bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
+      <div id="errorMsg"></div>
+      <div id="errorTraceId" class="hidden mt-1 text-xs text-red-500 font-mono"></div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="results" class="hidden">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-lg font-semibold text-gray-700">Results <span id="resultCount" class="text-sm font-normal text-gray-400"></span></h2>
+      <button onclick="copyRaw()" class="text-xs text-blue-600 hover:underline">Copy raw JSON</button>
+    </div>
+
+    <!-- Table view -->
+    <div id="tableView" class="bg-white rounded-xl shadow overflow-hidden mb-4">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-200">
+          <tr>
+            <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Client Name</th>
+            <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Client ID</th>
+            <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Client Secret</th>
+            <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Grant Types</th>
+            <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Redirect URIs</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody" class="divide-y divide-gray-100"></tbody>
+      </table>
+    </div>
+
+    <!-- Raw JSON toggle -->
+    <details class="bg-white rounded-xl shadow">
+      <summary class="px-4 py-3 text-sm font-medium text-gray-600 cursor-pointer select-none hover:text-gray-800">Raw JSON</summary>
+      <pre id="rawJson" class="px-4 pb-4 text-xs font-mono text-gray-700 overflow-auto max-h-96 whitespace-pre-wrap break-all"></pre>
+    </details>
+  </div>
+
+</div>
+
+<script>
+  let _rawData = null;
+
+  document.getElementById('browseForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    await fetchClients();
+  });
+
+  async function fetchClients() {
+    const url = document.getElementById('oauthServerUrl').value.trim();
+    const tenant = document.getElementById('tenant').value.trim();
+    const pat = document.getElementById('pat').value;
+    const errorBox = document.getElementById('errorBox');
+    const spinner = document.getElementById('spinner');
+    const results = document.getElementById('results');
+
+    errorBox.classList.add('hidden');
+    results.classList.add('hidden');
+    spinner.classList.remove('hidden');
+    document.getElementById('submitBtn').disabled = true;
+
+    try {
+      const resp = await fetch('/api/browse-clients', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ oauth_server_url: url, tenant, pat }),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        const detail = data.detail;
+        document.getElementById('errorMsg').textContent =
+          (typeof detail === 'object' ? detail?.message : detail) || 'Request failed.';
+        const traceEl = document.getElementById('errorTraceId');
+        const traceId = typeof detail === 'object' ? detail?.trace_id : null;
+        if (traceId) {
+          traceEl.textContent = `trace_id: ${traceId}`;
+          traceEl.classList.remove('hidden');
+        } else {
+          traceEl.classList.add('hidden');
+        }
+        errorBox.classList.remove('hidden');
+        return;
+      }
+
+      _rawData = data;
+      renderResults(data);
+      results.classList.remove('hidden');
+    } catch (err) {
+      document.getElementById('errorMsg').textContent = 'Network error: ' + err.message;
+      errorBox.classList.remove('hidden');
+    } finally {
+      spinner.classList.add('hidden');
+      document.getElementById('submitBtn').disabled = false;
+    }
+  }
+
+  function renderResults(data) {
+    const clients = Array.isArray(data) ? data : (data.clients ?? data.data ?? [data]);
+    document.getElementById('resultCount').textContent = `(${clients.length})`;
+
+    const tbody = document.getElementById('tableBody');
+    if (clients.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="px-4 py-6 text-center text-gray-400 text-sm">No clients returned.</td></tr>';
+    } else {
+      tbody.innerHTML = clients.map(c => `
+        <tr class="hover:bg-gray-50">
+          <td class="px-4 py-3 font-medium text-gray-800">${esc(c.client_name ?? '')}</td>
+          <td class="px-4 py-3 font-mono text-xs text-gray-600">
+            <div class="flex items-center gap-1.5">
+              <span class="break-all">${esc(c.client_id ?? '')}</span>
+              ${c.client_id ? `<button onclick="copyText(${esc(JSON.stringify(c.client_id))})" class="shrink-0 text-blue-500 hover:text-blue-700" title="Copy">⎘</button>` : ''}
+            </div>
+          </td>
+          <td class="px-4 py-3 font-mono text-xs text-gray-600">
+            <div class="flex items-center gap-1.5">
+              <span class="break-all">${c.client_secret ? esc(c.client_secret) : '<span class="text-gray-400 not-italic font-sans">(none)</span>'}</span>
+              ${c.client_secret ? `<button onclick="copyText(${esc(JSON.stringify(c.client_secret))})" class="shrink-0 text-blue-500 hover:text-blue-700" title="Copy">⎘</button>` : ''}
+            </div>
+          </td>
+          <td class="px-4 py-3 text-gray-600">${(c.grant_types ?? []).map(g => `<span class="inline-block bg-gray-100 rounded px-1.5 py-0.5 text-xs mr-1">${esc(g)}</span>`).join('')}</td>
+          <td class="px-4 py-3 font-mono text-xs text-gray-600 space-y-0.5">${(c.redirect_uris ?? []).map(u => `<div class="break-all">${esc(u)}</div>`).join('')}</td>
+        </tr>
+      `).join('');
+    }
+
+    document.getElementById('rawJson').textContent = JSON.stringify(data, null, 2);
+  }
+
+  function esc(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function copyText(value) {
+    navigator.clipboard.writeText(value);
+  }
+
+  function copyRaw() {
+    if (_rawData) navigator.clipboard.writeText(JSON.stringify(_rawData, null, 2));
+  }
+</script>
+</body>
+</html>

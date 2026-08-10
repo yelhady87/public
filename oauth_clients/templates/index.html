@@ -11,7 +11,10 @@
 <div class="max-w-6xl mx-auto py-10 px-4">
 
   <!-- Header -->
-  <h1 class="text-2xl font-bold text-gray-800 mb-8">OAuth Client Registration</h1>
+  <div class="flex items-center justify-between mb-8">
+    <h1 class="text-2xl font-bold text-gray-800">OAuth Client Registration</h1>
+    <a href="/browse" class="text-sm text-blue-600 hover:underline">Browse Clients &rarr;</a>
+  </div>
 
   <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8 items-start">
 
@@ -366,11 +369,6 @@
         <input id="addUrlInput" type="url" required placeholder="https://myapp.com/new-callback"
           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 font-mono" />
       </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-600 mb-1">Admin PAT</label>
-        <input id="addUrlPat" type="password" required placeholder="Personal Access Token"
-          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500" />
-      </div>
     </div>
     <div id="addUrlError" class="hidden mt-3 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
       <div id="addUrlErrorMsg"></div>
@@ -383,6 +381,19 @@
       </button>
       <span id="addUrlSpinner" class="hidden text-sm text-gray-500">Updating...</span>
     </div>
+  </div>
+</div>
+
+<!-- View Definition Modal -->
+<div id="definitionModal" class="hidden fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-base font-semibold text-gray-800">Client Definition <span class="text-xs font-normal text-gray-400">(from auth server)</span></h3>
+      <button onclick="closeDefinitionModal()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <div id="definitionSpinner" class="hidden text-sm text-gray-500 py-4 text-center">Fetching from auth server…</div>
+    <div id="definitionError" class="hidden bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700"></div>
+    <pre id="definitionContent" class="hidden bg-gray-50 border border-gray-200 rounded-lg p-4 text-xs font-mono overflow-auto max-h-96 whitespace-pre-wrap break-all"></pre>
   </div>
 </div>
 
@@ -445,6 +456,7 @@
         <td class="py-2 text-right space-x-3">
           <button onclick='showDetail(${JSON.stringify(c)})' class="text-blue-600 hover:underline text-xs">Details</button>
           <button onclick='openAddUrl(${JSON.stringify(c)})' class="text-green-600 hover:underline text-xs">Add URL</button>
+          <button onclick='viewDefinition(${JSON.stringify(c.client_id)})' class="text-indigo-600 hover:underline text-xs">View Definition</button>
         </td>
       </tr>
     `).join('');
@@ -466,6 +478,7 @@
       ['OAuth Server', c.oauth_server_url],
       ['Client ID', c.client_id],
       ['Client Secret', c.client_secret ?? '(none)'],
+      ['Reg. Access Token', c.registration_access_token ?? '(none)'],
       ['Admin PAT', c.pat ?? ''],
       ['Callback URLs', (c.redirect_uris || []).join('\n')],
       ['Grant Types', (c.grant_types || []).join(', ')],
@@ -571,7 +584,6 @@
     document.getElementById('addUrlClientName').textContent = c.client_name;
     document.getElementById('addUrlClientId').textContent = c.client_id;
     document.getElementById('addUrlInput').value = '';
-    document.getElementById('addUrlPat').value = c.pat || '';
     document.getElementById('addUrlError').classList.add('hidden');
     document.getElementById('addUrlModal').classList.remove('hidden');
   }
@@ -586,11 +598,10 @@
 
   async function submitAddUrl() {
     const newUrl = document.getElementById('addUrlInput').value.trim();
-    const pat = document.getElementById('addUrlPat').value;
     const errorBox = document.getElementById('addUrlError');
     const spinner = document.getElementById('addUrlSpinner');
 
-    if (!newUrl || !pat) return;
+    if (!newUrl) return;
 
     errorBox.classList.add('hidden');
     spinner.classList.remove('hidden');
@@ -599,7 +610,7 @@
       const resp = await fetch(`/api/clients/${encodeURIComponent(_addUrlClientId)}/redirect-uris`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pat, new_redirect_uri: newUrl }),
+        body: JSON.stringify({ new_redirect_uri: newUrl }),
       });
 
       const data = await resp.json();
@@ -872,6 +883,44 @@
     a.click();
     URL.revokeObjectURL(a.href);
   }
+
+  async function viewDefinition(clientId) {
+    const modal = document.getElementById('definitionModal');
+    const spinner = document.getElementById('definitionSpinner');
+    const errorEl = document.getElementById('definitionError');
+    const content = document.getElementById('definitionContent');
+
+    spinner.classList.remove('hidden');
+    errorEl.classList.add('hidden');
+    content.classList.add('hidden');
+    modal.classList.remove('hidden');
+
+    try {
+      const resp = await fetch(`/api/clients/${encodeURIComponent(clientId)}/definition`);
+      const data = await resp.json();
+      if (!resp.ok) {
+        const detail = data.detail;
+        errorEl.textContent = (typeof detail === 'object' ? detail?.message : detail) || 'Failed to fetch client definition.';
+        errorEl.classList.remove('hidden');
+      } else {
+        content.textContent = JSON.stringify(data, null, 2);
+        content.classList.remove('hidden');
+      }
+    } catch (err) {
+      errorEl.textContent = 'Network error: ' + err.message;
+      errorEl.classList.remove('hidden');
+    } finally {
+      spinner.classList.add('hidden');
+    }
+  }
+
+  function closeDefinitionModal() {
+    document.getElementById('definitionModal').classList.add('hidden');
+  }
+
+  document.getElementById('definitionModal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeDefinitionModal();
+  });
 
   loadClients();
 </script>

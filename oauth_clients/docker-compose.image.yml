@@ -1,0 +1,12 @@
+services:
+  app:
+    image: yelhady/incorta_oauth_clients:v0.1
+    ports:
+      - "9999:8000"
+    volumes:
+      - clients_data_prod:/app/data
+      - ${DELTA_TENANTS_PATH:-/tmp/tenants}:/app/tenants:ro
+    restart: unless-stopped
+
+volumes:
+  clients_data_prod:

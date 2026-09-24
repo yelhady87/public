@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dynamic OIDC Demo Client</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<div class="max-w-5xl mx-auto py-10 px-4">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-8">
+    <h1 class="text-2xl font-bold text-gray-800">Dynamic OIDC Demo Client</h1>
+    <span id="flowStatus" class="text-sm text-gray-500"></span>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+
+    <!-- Registration -->
+    <div class="bg-white rounded-xl shadow p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-gray-700">Client Registration</h2>
+        <span id="regBadge" class="text-xs font-medium px-2.5 py-1 rounded-full"></span>
+      </div>
+
+      <div class="mb-4">
+        <label for="regClientName" class="block text-xs text-gray-500 mb-1">Client Name <span class="text-gray-300">(registration payload)</span></label>
+        <div class="flex gap-2">
+          <input id="regClientName" type="text" placeholder="Dynamic OIDC Demo Client"
+            class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          <button onclick="saveClientName()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors shrink-0">
+            Save
+          </button>
+        </div>
+        <p id="regNameNote" class="mt-1 text-xs text-gray-400">Sent as <code>client_name</code> on the next registration request.</p>
+        <div id="regNameError" class="hidden mt-2 text-xs text-red-600"></div>
+      </div>
+
+      <div class="space-y-2 text-sm">
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500 w-32 shrink-0">Client ID</span>
+          <code id="regClientId" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500 w-32 shrink-0">Registered Name</span>
+          <code id="regClientNameSaved" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500 w-32 shrink-0">Client Secret</span>
+          <code id="regClientSecret" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+          <button onclick="toggleSecret()" class="text-xs text-blue-600 hover:underline shrink-0">Show</button>
+          <button onclick="copyText('regClientSecret')" class="text-xs text-blue-600 hover:underline shrink-0">Copy</button>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">Redirect URI</span>
+          <code id="regRedirectUri" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">Grant Types</span>
+          <div id="regGrantTypes" class="flex-1 text-xs"></div>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">Scopes</span>
+          <code id="regScopes" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">Auth Method</span>
+          <code id="regAuthMethod" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">Issuer</span>
+          <code id="regIssuer" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+      </div>
+
+      <div id="regError" class="hidden mt-4 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+        <div id="regErrorMsg"></div>
+        <div id="regErrorTraceId" class="hidden mt-1 text-xs text-red-500 font-mono"></div>
+      </div>
+
+      <div class="flex items-center gap-3 mt-5">
+        <button onclick="registerClient()"
+          class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors">
+          Register / Re-register
+        </button>
+        <span id="regSpinner" class="hidden text-sm text-gray-500">Registering…</span>
+      </div>
+    </div>
+
+    <!-- Discovery -->
+    <div class="bg-white rounded-xl shadow p-6">
+      <h2 class="text-lg font-semibold text-gray-700 mb-4">OIDC Discovery</h2>
+
+      <div class="mb-4">
+        <label for="discBaseUrl" class="block text-xs text-gray-500 mb-1">Discovery Base URL</label>
+        <div class="flex gap-2">
+          <input id="discBaseUrl" type="text" placeholder="http://localhost:8080/.well-known/openid-configuration"
+            class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          <button onclick="saveDiscoveryUrl()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors shrink-0">
+            Save
+          </button>
+        </div>
+        <p id="discUrlNote" class="mt-1 text-xs text-gray-400">Enter the full discovery document URL. It is used as-is.</p>
+        <div id="discUrlError" class="hidden mt-2 text-xs text-red-600"></div>
+      </div>
+
+      <div class="space-y-2 text-sm">
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">Discovery URL</span>
+          <code id="discUrl" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">Issuer</span>
+          <code id="discIssuer" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">Authorize</span>
+          <code id="discAuthorize" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">Token</span>
+          <code id="discToken" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">Register</span>
+          <code id="discRegister" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-gray-500 w-32 shrink-0 mt-0.5">JWKS</span>
+          <code id="discJwks" class="bg-gray-50 border border-gray-200 rounded px-2 py-0.5 font-mono text-xs flex-1 break-all">—</code>
+        </div>
+      </div>
+      <div class="mt-5">
+        <button onclick="loadDiscovery()" class="text-xs text-blue-600 hover:underline">Refresh discovery</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Authentication -->
+  <div class="bg-white rounded-xl shadow p-6 mt-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold text-gray-700">Authorization Code Flow (PKCE)</h2>
+      <div class="flex items-center gap-3">
+        <button onclick="refreshTokens()" id="refreshBtn" class="hidden text-xs text-purple-600 hover:underline">Refresh tokens</button>
+        <a href="/logout" id="logoutBtn" class="hidden text-xs text-red-600 hover:underline">Log out</a>
+      </div>
+    </div>
+
+    <div id="loggedOut" class="text-sm text-gray-500 flex items-center gap-4">
+      <span>No active session.</span>
+      <a href="/login" class="bg-green-600 hover:bg-green-700 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors">
+        Log in
+      </a>
+    </div>
+
+    <div id="loggedIn" class="hidden space-y-4">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+        <div class="bg-purple-50 border border-purple-100 rounded-lg p-3">
+          <div class="text-xs text-purple-500 mb-1">Token Type</div>
+          <code id="tokType" class="font-mono text-xs break-all">—</code>
+        </div>
+        <div class="bg-purple-50 border border-purple-100 rounded-lg p-3">
+          <div class="text-xs text-purple-500 mb-1">Expires In</div>
+          <code id="tokExpires" class="font-mono text-xs break-all">—</code>
+        </div>
+        <div class="bg-purple-50 border border-purple-100 rounded-lg p-3">
+          <div class="text-xs text-purple-500 mb-1">Scope</div>
+          <code id="tokScope" class="font-mono text-xs break-all">—</code>
+        </div>
+      </div>
+
+      <div>
+        <div class="text-xs text-gray-400 mb-1">Access Token</div>
+        <code id="tokAccess" class="block bg-gray-50 border border-gray-200 rounded-lg p-3 font-mono text-xs break-all whitespace-pre-wrap">—</code>
+      </div>
+      <div>
+        <div class="text-xs text-gray-400 mb-1">Refresh Token</div>
+        <code id="tokRefresh" class="block bg-gray-50 border border-gray-200 rounded-lg p-3 font-mono text-xs break-all whitespace-pre-wrap">—</code>
+      </div>
+      <div>
+        <div class="text-xs text-gray-400 mb-1">ID Token Claims <span class="text-gray-300">(JWKS signature verified)</span></div>
+        <pre id="tokClaims" class="bg-gray-50 border border-gray-200 rounded-lg p-3 font-mono text-xs overflow-auto max-h-72">—</pre>
+      </div>
+    </div>
+
+    <div id="flowError" class="hidden mt-4 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+      <div id="flowErrorMsg"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let _secretShown = false;
+  let _registration = null;
+
+  async function loadDiscovery() {
+    const [discResp, cfgResp] = await Promise.all([
+      fetch('/api/discovery'),
+      fetch('/api/discovery/config'),
+    ]);
+    const data = await discResp.json();
+    let cfg = {};
+    try { cfg = await cfgResp.json(); } catch (e) {}
+    const configuredUrl = cfg.discovery_url || '';
+    if (configuredUrl) document.getElementById('discBaseUrl').value = configuredUrl;
+    document.getElementById('discUrl').textContent = configuredUrl || (data.issuer ? data.issuer.replace(/\/$/, '') + '/.well-known/openid-configuration' : '—');
+    document.getElementById('discIssuer').textContent = data.issuer || '—';
+    document.getElementById('discAuthorize').textContent = data.authorization_endpoint || '—';
+    document.getElementById('discToken').textContent = data.token_endpoint || '—';
+    document.getElementById('discRegister').textContent = data.registration_endpoint || '—';
+    document.getElementById('discJwks').textContent = data.jwks_uri || '—';
+  }
+
+  async function saveDiscoveryUrl() {
+    const input = document.getElementById('discBaseUrl');
+    const err = document.getElementById('discUrlError');
+    err.classList.add('hidden');
+    const url = (input.value || '').trim();
+    if (!url) { err.textContent = 'Please enter a discovery URL.'; err.classList.remove('hidden'); return; }
+    try {
+      const resp = await fetch('/api/discovery/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ discovery_url: url }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        const detail = data.detail;
+        err.textContent = (typeof detail === 'object' ? detail?.message : detail) || 'Failed to save discovery URL.';
+        err.classList.remove('hidden');
+        return;
+      }
+      input.value = data.discovery_url;
+      await loadDiscovery();
+      await loadRegistration();
+    } catch (e) {
+      err.textContent = 'Network error: ' + e.message;
+      err.classList.remove('hidden');
+    }
+  }
+
+  async function loadRegistration() {
+    const badge = document.getElementById('regBadge');
+    const err = document.getElementById('regError');
+    err.classList.add('hidden');
+    try {
+      const [regResp, cfgResp] = await Promise.all([
+        fetch('/api/registration'),
+        fetch('/api/registration/config'),
+      ]);
+      const data = await regResp.json();
+      let cfg = {};
+      try { cfg = await cfgResp.json(); } catch (e) {}
+      if (cfg.client_name) document.getElementById('regClientName').value = cfg.client_name;
+      if (!regResp.ok) {
+        badge.textContent = 'Not registered';
+        badge.classList.add('bg-gray-100', 'text-gray-600');
+        document.getElementById('regClientNameSaved').textContent = '—';
+        return;
+      }
+      _registration = data;
+      badge.textContent = 'Registered';
+      badge.classList.add('bg-green-100', 'text-green-700');
+      document.getElementById('regClientId').textContent = data.client_id || '—';
+      document.getElementById('regClientNameSaved').textContent = data.client_name || '—';
+      document.getElementById('regClientSecret').textContent = '••••••••••••••••';
+      _secretShown = false;
+      document.getElementById('regRedirectUri').textContent = (data.redirect_uris || []).join(', ') || '—';
+      document.getElementById('regGrantTypes').innerHTML = (data.grant_types || [])
+        .map(g => `<code class="bg-gray-100 rounded px-1.5 py-0.5 font-mono text-xs mr-1">${esc(g)}</code>`).join('');
+      document.getElementById('regScopes').textContent = data.scope || '—';
+      document.getElementById('regAuthMethod').textContent = data.token_endpoint_auth_method || '—';
+      document.getElementById('regIssuer').textContent = data.issuer || '—';
+    } catch (e) {
+      badge.textContent = 'Error';
+      badge.classList.add('bg-red-100', 'text-red-700');
+    }
+  }
+
+  async function saveClientName() {
+    const input = document.getElementById('regClientName');
+    const err = document.getElementById('regNameError');
+    err.classList.add('hidden');
+    const name = (input.value || '').trim();
+    if (!name) { err.textContent = 'Please enter a client name.'; err.classList.remove('hidden'); return; }
+    try {
+      const resp = await fetch('/api/registration/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_name: name }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        const detail = data.detail;
+        err.textContent = (typeof detail === 'object' ? detail?.message : detail) || 'Failed to save client name.';
+        err.classList.remove('hidden');
+        return;
+      }
+      input.value = data.client_name;
+    } catch (e) {
+      err.textContent = 'Network error: ' + e.message;
+      err.classList.remove('hidden');
+    }
+  }
+
+  async function registerClient() {
+    const btn = document.getElementById('regSpinner');
+    const err = document.getElementById('regError');
+    err.classList.add('hidden');
+    btn.classList.remove('hidden');
+    try {
+      const resp = await fetch('/api/register', { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        const detail = data.detail;
+        const msg = (typeof detail === 'object' ? detail?.message : detail) || 'Registration failed.';
+        const traceId = typeof detail === 'object' ? detail?.trace_id : null;
+        document.getElementById('regErrorMsg').textContent = msg;
+        const traceEl = document.getElementById('regErrorTraceId');
+        if (traceId) { traceEl.textContent = 'Trace ID: ' + traceId; traceEl.classList.remove('hidden'); }
+        else traceEl.classList.add('hidden');
+        err.classList.remove('hidden');
+      } else {
+        await loadRegistration();
+      }
+    } catch (e) {
+      document.getElementById('regErrorMsg').textContent = 'Network error: ' + e.message;
+      document.getElementById('regErrorTraceId').classList.add('hidden');
+      err.classList.remove('hidden');
+    } finally {
+      btn.classList.add('hidden');
+    }
+  }
+
+  function toggleSecret() {
+    const el = document.getElementById('regClientSecret');
+    const btn = document.querySelector('button[onclick="toggleSecret()"]');
+    if (_secretShown) {
+      el.textContent = '••••••••••••••••';
+      btn.textContent = 'Show';
+    } else {
+      el.textContent = _registration ? (_registration.client_secret || '(none)') : '—';
+      btn.textContent = 'Hide';
+    }
+    _secretShown = !_secretShown;
+  }
+
+  async function loadSession() {
+    const resp = await fetch('/api/session');
+    const data = await resp.json();
+    const loggedIn = data && data.access_token;
+    document.getElementById('loggedOut').classList.toggle('hidden', !!loggedIn);
+    document.getElementById('loggedIn').classList.toggle('hidden', !loggedIn);
+    document.getElementById('logoutBtn').classList.toggle('hidden', !loggedIn);
+    document.getElementById('refreshBtn').classList.toggle('hidden', !loggedIn);
+
+    const status = document.getElementById('flowStatus');
+    if (loggedIn) {
+      status.textContent = 'Authenticated';
+      status.classList.add('text-green-600');
+      status.classList.remove('text-gray-500');
+      document.getElementById('tokType').textContent = data.token_type || '—';
+      document.getElementById('tokExpires').textContent = data.expires_in != null ? data.expires_in + ' s' : '—';
+      document.getElementById('tokScope').textContent = data.scope || '—';
+      document.getElementById('tokAccess').textContent = data.access_token || '—';
+      document.getElementById('tokRefresh').textContent = data.refresh_token || '(none)';
+      document.getElementById('tokClaims').textContent = JSON.stringify(data.id_token_claims || {}, null, 2);
+    } else {
+      status.textContent = '';
+      status.classList.add('text-gray-500');
+      status.classList.remove('text-green-600');
+    }
+  }
+
+  async function refreshTokens() {
+    const err = document.getElementById('flowError');
+    err.classList.add('hidden');
+    try {
+      const resp = await fetch('/api/refresh', { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        const detail = data.detail;
+        document.getElementById('flowErrorMsg').textContent =
+          (typeof detail === 'object' ? detail?.message : detail) || 'Refresh failed.';
+        err.classList.remove('hidden');
+      } else {
+        await loadSession();
+      }
+    } catch (e) {
+      document.getElementById('flowErrorMsg').textContent = 'Network error: ' + e.message;
+      err.classList.remove('hidden');
+    }
+  }
+
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function copyText(id) {
+    navigator.clipboard.writeText(document.getElementById(id).textContent);
+  }
+
+  loadDiscovery();
+  loadRegistration();
+  loadSession();
+</script>
+</body>
+</html>

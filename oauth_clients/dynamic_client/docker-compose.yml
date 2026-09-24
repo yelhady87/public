@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8100:8100"
+    volumes:
+      - registration_data:/app/data
+    environment:
+      - OIDC_DISCOVERY_URL=${OIDC_DISCOVERY_URL:-http://host.docker.internal/incorta/oauth/demo/.well-known/openid-configuration}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:8100}
+      - CLIENT_NAME=${CLIENT_NAME:-Dynamic OIDC Demo Client}
+      - CLIENT_SCOPES=${CLIENT_SCOPES:-openid profile email}
+      - INITIAL_ACCESS_TOKEN=${INITIAL_ACCESS_TOKEN:-}
+    restart: unless-stopped
+
+volumes:
+  registration_data:

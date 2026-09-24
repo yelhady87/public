@@ -325,7 +325,7 @@
       <div class="flex items-center gap-3">
         <input id="importCsvFile" type="file" accept=".csv" class="hidden" onchange="importClients(event)" />
         <button onclick="document.getElementById('importCsvFile').click()" class="text-xs text-green-600 hover:underline">Import CSV</button>
-        <button onclick="exportClients()" class="text-xs text-green-600 hover:underline">Export CSV</button>
+        <button id="exportCsvBtn" onclick="exportClients()" class="text-xs text-green-600 hover:underline">Export CSV</button>
         <button onclick="loadClients()" class="text-xs text-blue-600 hover:underline">Refresh</button>
       </div>
     </div>
@@ -340,6 +340,9 @@
       <table class="w-full text-sm text-left">
         <thead class="text-xs text-gray-500 uppercase border-b">
           <tr>
+            <th class="pb-2 pr-2 w-8">
+              <input id="selectAllClients" type="checkbox" class="cursor-pointer" onchange="toggleSelectAll(this)" title="Select all visible clients" />
+            </th>
             <th class="pb-2 pr-4">Registered</th>
             <th class="pb-2 pr-4">Tenant</th>
             <th class="pb-2 pr-4">Client Name</th>
@@ -413,22 +416,68 @@
 
 <script>
   let _allClients = [];
+  let _selectedClientIds = new Set();
 
-  async function loadClients() {
-    const resp = await fetch('/api/clients');
-    _allClients = await resp.json();
-    populateTokenClientSelector(_allClients);
-    renderClients();
-  }
-
-  function renderClients() {
+  function getFilteredClients() {
     const query = (document.getElementById('clientsSearch').value || '').toLowerCase();
-    const clients = _allClients.filter(c =>
+    return _allClients.filter(c =>
       !query ||
       (c.tenant || '').toLowerCase().includes(query) ||
       (c.client_name || '').toLowerCase().includes(query) ||
       (c.client_id || '').toLowerCase().includes(query)
     );
+  }
+
+  function updateExportButton() {
+    const btn = document.getElementById('exportCsvBtn');
+    if (!btn) return;
+    const n = _selectedClientIds.size;
+    btn.textContent = n > 0 ? `Export Selected (${n})` : 'Export CSV';
+  }
+
+  function syncSelectAllCheckbox() {
+    const cb = document.getElementById('selectAllClients');
+    if (!cb) return;
+    const visibleIds = getFilteredClients().map(c => c.client_id);
+    const selectedVisible = visibleIds.filter(id => _selectedClientIds.has(id));
+    cb.checked = visibleIds.length > 0 && selectedVisible.length === visibleIds.length;
+    cb.indeterminate = selectedVisible.length > 0 && selectedVisible.length < visibleIds.length;
+  }
+
+  function syncSelectionUi() {
+    updateExportButton();
+    syncSelectAllCheckbox();
+  }
+
+  function toggleSelectClient(checkbox, clientId) {
+    if (checkbox.checked) _selectedClientIds.add(clientId);
+    else _selectedClientIds.delete(clientId);
+    syncSelectionUi();
+  }
+
+  function toggleSelectAll(checkbox) {
+    const visible = getFilteredClients();
+    if (checkbox.checked) {
+      visible.forEach(c => _selectedClientIds.add(c.client_id));
+    } else {
+      visible.forEach(c => _selectedClientIds.delete(c.client_id));
+    }
+    renderClients();
+  }
+
+  async function loadClients() {
+    const resp = await fetch('/api/clients');
+    _allClients = await resp.json();
+    const validIds = new Set(_allClients.map(c => c.client_id));
+    for (const id of [..._selectedClientIds]) {
+      if (!validIds.has(id)) _selectedClientIds.delete(id);
+    }
+    populateTokenClientSelector(_allClients);
+    renderClients();
+  }
+
+  function renderClients() {
+    const clients = getFilteredClients();
 
     const empty = document.getElementById('clientsEmpty');
     const table = document.getElementById('clientsTable');
@@ -438,6 +487,7 @@
       empty.textContent = 'No clients registered yet.';
       empty.classList.remove('hidden');
       table.classList.add('hidden');
+      syncSelectionUi();
       return;
     }
 
@@ -445,6 +495,7 @@
       empty.textContent = 'No clients match your search.';
       empty.classList.remove('hidden');
       table.classList.add('hidden');
+      syncSelectionUi();
       return;
     }
 
@@ -452,6 +503,7 @@
     table.classList.remove('hidden');
     body.innerHTML = clients.slice().reverse().map(c => `
       <tr class="hover:bg-gray-50">
+        <td class="py-2 pr-2"><input type="checkbox" class="cursor-pointer" ${_selectedClientIds.has(c.client_id) ? 'checked' : ''} onchange="toggleSelectClient(this, '${esc(c.client_id)}')" /></td>
         <td class="py-2 pr-4 text-gray-500 whitespace-nowrap">${formatDate(c.registered_at)}</td>
         <td class="py-2 pr-4 font-medium">${esc(c.tenant)}</td>
         <td class="py-2 pr-4">${esc(c.client_name)}</td>
@@ -463,6 +515,7 @@
         </td>
       </tr>
     `).join('');
+    syncSelectionUi();
   }
 
   function formatDate(iso) {

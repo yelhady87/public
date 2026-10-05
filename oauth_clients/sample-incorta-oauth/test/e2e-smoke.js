@@ -32,12 +32,19 @@ const INCORTA_ERROR_TRACE_ID = 'ffffffff00112233445566778899';
 // tenant in the route cannot pass by accident.
 const SMOKE_INCORTA_TENANT = 'tenant_from_env';
 let failNextSchemaList = false;
+let failNextChat = false;
 
 let capturedForUser = null;
 let capturedGrantType = null;
 let capturedAuthHeader = null;
 let capturedIncortaPath = null;
 let incortaTokenCalls = 0;
+
+// Copilot A2A request capture
+let capturedA2aPath = null;
+let capturedA2aAgent = null;
+let capturedA2aHeaders = null;
+let capturedA2aBody = null;
 
 // ---- Signing key material for the mock IdP ----
 const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
@@ -70,6 +77,83 @@ function signJwt(payload) {
     privateKey
   );
   return `${signingInput}.${base64url(signature)}`;
+}
+
+/**
+ * Extract the home page's replyText() from the served HTML and return a callable
+ * that runs it against a sample A2A reply.
+ *
+ * replyText lives in a template literal inside server.js, so the only way to test
+ * the shipped code rather than a copy of it is to pull the function text back out
+ * of the rendered page and evaluate it. Brace matching is deliberate rather than a
+ * regex: the body contains string literals with braces in them, so counting
+ * braces from the opening one finds the real end.
+ *
+ * Evaluating this text is also the only automated check that the inlined script
+ * parses at all. A template literal resolves escape sequences before the browser
+ * sees the code, so a stray '\n' written in server.js arrives at the browser as a
+ * real newline inside a string literal - a syntax error that silently kills every
+ * handler on the page. The test failed on exactly that, which is the point.
+ */
+function makeReplyTextRunner(homeHtml) {
+  const start = homeHtml.indexOf('function replyText(data)');
+  assert.ok(start !== -1, 'home page should ship a replyText() function');
+
+  let depth = 0;
+  let end = -1;
+  for (let i = homeHtml.indexOf('{', start); i < homeHtml.length; i += 1) {
+    const ch = homeHtml[i];
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  assert.ok(end !== -1, 'replyText() body should be brace-balanced so it can be extracted');
+
+  const source = homeHtml.slice(start, end + 1);
+  let replyText;
+  try {
+    // eslint-disable-next-line no-new-func
+    replyText = new Function(`${source}; return replyText;`)();
+  } catch (err) {
+    throw new Error(
+      `the home page's inline script does not parse, so every button on it would be dead: ${err.message}\n` +
+        `--- extracted source ---\n${source}`
+    );
+  }
+  return (reply) => replyText(reply);
+}
+
+/**
+ * Parse the whole inline <script> block of the logged-in page.
+ *
+ * Stronger than the replyText check because it covers the chat handlers and the
+ * schema renderer together. A single unescaped '\\n' anywhere in the server-side
+ * template literal breaks the entire block at once, taking the logout link's
+ * sibling buttons with it - and nothing else in the suite would notice, since the
+ * server-rendered HTML is still served fine.
+ */
+function assertInlineScriptParses(homeHtml) {
+  const scripts = homeHtml.match(/<script>([\s\S]*?)<\/script>/g) || [];
+  assert.ok(scripts.length, 'the logged-in page should include an inline script');
+
+  for (const tag of scripts) {
+    const body = tag.replace(/^<script>/, '').replace(/<\/script>$/, '');
+    try {
+      // eslint-disable-next-line no-new-func
+      new Function(body);
+    } catch (err) {
+      throw new Error(
+        `the logged-in page's inline script does not parse: ${err.message}\n` +
+          'This usually means an escape sequence in the server-side template literal was written ' +
+          'unescaped, which would leave every button on the page dead in the browser.'
+      );
+    }
+  }
 }
 
 /**
@@ -465,6 +549,59 @@ const incorta = http.createServer((req, res) => {
     return;
   }
 
+  // Mock Copilot A2A agent. Records exactly what the route sent so the tests can
+  // assert on the request contract (minimal headers, Bearer token, JSON-RPC
+  // envelope) and on the conversation id staying stable across messages.
+  const a2aMatch = /^\/incorta\/api\/v2\/[^/]+\/copilot\/a2a\/agent\/([^/]+)$/.exec(
+    url.pathname
+  );
+  if (a2aMatch && req.method === 'POST') {
+    capturedA2aPath = url.pathname;
+    capturedA2aAgent = a2aMatch[1];
+    capturedA2aHeaders = req.headers;
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      capturedA2aBody = JSON.parse(body || '{}');
+
+      if (failNextChat) {
+        failNextChat = false;
+        // Incorta reports a missing Copilot entitlement as a 500 with a readable
+        // message and a trace-id, so the mock reproduces that real shape rather
+        // than a tidy 4xx the app would never have to handle.
+        return json(
+          res,
+          500,
+          {
+            message:
+              'INC_05000301: Runtime exception occurred [You do not have the necessary permissions to access the Copilot.].',
+          },
+          { 'trace-id': INCORTA_ERROR_TRACE_ID }
+        );
+      }
+
+      // JSON-RPC 2.0 envelope with the agent's text under result.message.parts,
+      // mirroring the shape the real endpoint returns with the message-part
+      // extension applied.
+      return json(
+        res,
+        200,
+        {
+          jsonrpc: '2.0',
+          id: capturedA2aBody.id,
+          result: {
+            role: 'agent',
+            parts: [{ kind: 'text', text: `Echo: ${capturedA2aBody.params.message.parts[0].text}` }],
+            messageId: 'agent-message-1',
+            contextId: capturedA2aBody.params.contextId,
+          },
+        },
+        { 'trace-id': INCORTA_TRACE_ID }
+      );
+    });
+    return;
+  }
+
   json(res, 404, { error: 'not_found' });
 });
 
@@ -622,8 +759,210 @@ let kcTokenCalls = 0;
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Chat request construction: dataset parsing, header set, JSON-RPC envelope.
+ *
+ * Pure functions, so this needs no server. The header assertions matter most
+ * here: the point of the endpoint is that only the API contract and the Bearer
+ * token are sent, so a test pins that down.
+ */
+function testA2aRequestBuilding() {
+  const {
+    resolveDatasets,
+    buildMessagePayload,
+    buildHeaders,
+    buildConversationContext,
+    agentUrl,
+    DEFAULT_EXTENSIONS,
+  } = require('../lib/incorta-a2a');
+
+  const saved = {};
+  const setEnv = (values) => {
+    for (const [k, v] of Object.entries(values)) {
+      // Capture the ORIGINAL value only once. Re-saving on every call would let
+      // the last value assigned win in restore(), leaking test values into the
+      // rest of the suite - and this process's env is inherited by the server it
+      // spawns.
+      if (!(k in saved)) saved[k] = process.env[k];
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+  const restore = () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+
+  try {
+    // --- datasets: empty means no dataset context, not a broken request ---
+    setEnv({ INCORTA_A2A_DATASETS: '', INCORTA_BASE_URL: 'http://localhost', INCORTA_TENANT: 'demo_keycloak' });
+    assert.deepStrictEqual(
+      resolveDatasets(),
+      [],
+      'an unset INCORTA_A2A_DATASETS should mean no dataset context'
+    );
+
+    // --- datasets: SCHEMA and SCHEMA:TABLE forms ---
+    setEnv({ INCORTA_A2A_DATASETS: 'HR' });
+    assert.deepStrictEqual(resolveDatasets(), [
+      { type: 'business_view', data: { schema_name: 'HR' } },
+    ]);
+
+    setEnv({ INCORTA_A2A_DATASETS: 'HR:Dept_BS, SALES , ' });
+    assert.deepStrictEqual(
+      resolveDatasets(),
+      [
+        { type: 'business_view', data: { schema_name: 'HR', table_name: 'Dept_BS' } },
+        { type: 'business_view', data: { schema_name: 'SALES' } },
+      ],
+      'datasets should parse comma-separated SCHEMA:TABLE pairs and ignore stray commas'
+    );
+
+    // A slash is accepted as the separator too, since it appears in dataset paths
+    setEnv({ INCORTA_A2A_DATASETS: 'HR/Dept_BS' });
+    assert.deepStrictEqual(resolveDatasets(), [
+      { type: 'business_view', data: { schema_name: 'HR', table_name: 'Dept_BS' } },
+    ]);
+
+    // --- headers: only accept, content-type, authorization, x-a2a-extensions ---
+    setEnv({ INCORTA_A2A_EXTENSIONS: undefined });
+    const headers = buildHeaders('incorta-access-token');
+    assert.strictEqual(
+      headers.authorization,
+      'Bearer incorta-access-token',
+      'the Bearer token must be the Incorta access token'
+    );
+    assert.strictEqual(headers.accept, 'application/json');
+    assert.strictEqual(headers['content-type'], 'application/json');
+    assert.strictEqual(
+      headers['x-a2a-extensions'],
+      DEFAULT_EXTENSIONS.join(', '),
+      'unset extensions should use the defaults'
+    );
+
+    // The browser-only headers from the original curl must not leak through:
+    // they describe the page that made the request, not the API contract.
+    for (const forbidden of [
+      'user-agent',
+      'origin',
+      'referer',
+      'cookie',
+      'sec-fetch-site',
+      'sec-fetch-mode',
+      'sec-fetch-dest',
+      'sec-ch-ua',
+      'sec-ch-ua-mobile',
+      'sec-ch-ua-platform',
+      'accept-language',
+      'cache-control',
+      'pragma',
+      'connection',
+      // XSRF guards Incorta's cookie-authenticated UI; this call is
+      // Bearer-authenticated and holds no cookies, so it is not forwarded.
+      'x-xsrf-token',
+    ]) {
+      assert.ok(
+        !(forbidden in headers),
+        `browser-only header "${forbidden}" must not be sent to the A2A endpoint`
+      );
+    }
+
+    // Only the four documented headers, so nothing sneaks in later
+    assert.deepStrictEqual(
+      Object.keys(headers).sort(),
+      ['accept', 'authorization', 'content-type', 'x-a2a-extensions'],
+      `unexpected header set: ${Object.keys(headers).join(', ')}`
+    );
+
+    // --- extensions: explicit value overrides, empty value sends none ---
+    setEnv({ INCORTA_A2A_EXTENSIONS: 'https://example.com/ext/a, https://example.com/ext/b' });
+    assert.strictEqual(
+      buildHeaders('t')['x-a2a-extensions'],
+      'https://example.com/ext/a, https://example.com/ext/b',
+      'a configured extension list should be sent verbatim'
+    );
+
+    setEnv({ INCORTA_A2A_EXTENSIONS: '' });
+    assert.ok(
+      !('x-a2a-extensions' in buildHeaders('t')),
+      'an explicitly empty extension list should send no header at all'
+    );
+
+    // --- conversation context ---
+    setEnv({ INCORTA_A2A_DATASETS: 'HR:Dept_BS', INCORTA_A2A_VERBOSITY: 'detailed' });
+    const ctx = buildConversationContext();
+    assert.strictEqual(ctx.client, 'general');
+    assert.strictEqual(ctx.client_context.verbosity, 'detailed');
+    assert.strictEqual(ctx.client_context.enable_summary, true);
+    assert.strictEqual(ctx.client_context.datasets.length, 1);
+    // current_date must be stamped now, not cached, or the agent resolves
+    // relative dates ("last quarter") against the wrong day
+    assert.ok(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(ctx.current_date),
+      `current_date should be YYYY-MM-DD HH:MM:SS, got ${ctx.current_date}`
+    );
+
+    setEnv({ INCORTA_A2A_ENABLE_SUMMARY: 'false' });
+    assert.strictEqual(
+      buildConversationContext().client_context.enable_summary,
+      false,
+      'enable_summary=false should disable the summary'
+    );
+
+    // --- JSON-RPC envelope ---
+    setEnv({ INCORTA_A2A_DATASETS: 'HR' });
+    const body = buildMessagePayload({
+      text: 'hi',
+      messageId: 'mid-1',
+      contextId: 'cid-1',
+      rpcId: 7,
+    });
+    assert.strictEqual(body.jsonrpc, '2.0');
+    assert.strictEqual(body.method, 'message/send');
+    assert.strictEqual(body.blocking, true);
+    assert.strictEqual(body.id, 7, 'the JSON-RPC id should be passed through');
+    assert.strictEqual(body.params.contextId, 'cid-1');
+    assert.strictEqual(body.params.message.messageId, 'mid-1');
+    assert.strictEqual(body.params.message.role, 'user');
+    assert.strictEqual(body.params.message.kind, 'message');
+    assert.deepStrictEqual(body.params.message.parts, [{ kind: 'text', text: 'hi' }]);
+    assert.ok(
+      body.params.message.metadata.conversation_context,
+      'the message should carry conversation_context metadata'
+    );
+
+    // --- agent URL uses the configured tenant and agent name ---
+    setEnv({ INCORTA_BASE_URL: 'http://localhost', INCORTA_TENANT: 'demo_keycloak' });
+    assert.strictEqual(
+      agentUrl(),
+      'http://localhost/incorta/api/v2/demo_keycloak/copilot/a2a/agent/smart-agent',
+      'the agent URL should follow the tenant from config'
+    );
+    setEnv({ INCORTA_A2A_AGENT: 'other-agent' });
+    assert.ok(
+      agentUrl().endsWith('/copilot/a2a/agent/other-agent'),
+      'the agent name should be configurable'
+    );
+    setEnv({ INCORTA_A2A_AGENT: '../admin' });
+    assert.throws(
+      () => agentUrl(),
+      /Invalid Incorta A2A agent/,
+      'a traversal attempt in the agent name must be rejected, since it becomes a URL path segment'
+    );
+  } finally {
+    restore();
+  }
+
+  console.log('✓ A2A request sends only accept/content-type/authorization + extensions');
+  console.log('✓ A2A request body is a JSON-RPC message/send envelope');
+  console.log('✓ A2A datasets, extensions, agent name and conversation context are configurable');
+}
+
 // Pure config logic, so it runs before any server is spawned
 testTenantResolution();
+testA2aRequestBuilding();
 testTokenLogging();
 
 /**
@@ -1054,6 +1393,15 @@ async function main() {
   const homeHtml = await home.text();
   assert.ok(homeHtml.includes('alice@example.com'), 'home page should show the email');
   assert.ok(!homeHtml.includes('Login with Fusion Auth'), 'home page should not show login button');
+  assert.ok(homeHtml.includes('Chat with Incorta Copilot'), 'home page should show the chat window');
+  assert.ok(
+    homeHtml.includes("/api/incorta/chat"),
+    'the chat window should post to the server-side chat route'
+  );
+  assert.ok(
+    !homeHtml.includes('incorta-access-token') && !homeHtml.includes('authorization:'),
+    'the chat window must not contain a token or an Authorization header value'
+  );
   console.log('✓ home page renders the logged-in state');
 
   // 7. Call the Incorta API
@@ -1079,6 +1427,184 @@ async function main() {
     'request body should match the curl example'
   );
   console.log('✓ Incorta schema list API returned data with the exact curl request body');
+
+  // 7a. Chat: the request contract the A2A endpoint depends on
+  const chatRes = await fetch(`http://localhost:${APP_PORT}/api/incorta/chat`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'hi' }),
+  });
+  const chatBody = await chatRes.json();
+  assert.strictEqual(
+    chatRes.status,
+    200,
+    `chat call should succeed, got ${chatRes.status}: ${JSON.stringify(chatBody)}`
+  );
+
+  assert.ok(
+    capturedA2aPath &&
+      capturedA2aPath.includes('/copilot/a2a/agent/smart-agent') &&
+      capturedA2aPath.includes(SMOKE_INCORTA_TENANT),
+    `agent URL should use the tenant from config, got ${capturedA2aPath}`
+  );
+  assert.strictEqual(capturedA2aAgent, 'smart-agent', 'agent name should come from config');
+
+  // Only the API contract plus the Bearer token, and it must be the Incorta
+  // token from the client_credentials exchange - not the user's IdP token.
+  assert.strictEqual(
+    capturedA2aHeaders.authorization,
+    'Bearer incorta-access-token',
+    'the A2A call must carry the Incorta access token'
+  );
+  // These must not be forwarded. Note user-agent is checked for the BROWSER's
+  // signature, not its absence: axios always stamps its own User-Agent, and that
+  // is harmless. What must not happen is the Chrome string from the original curl
+  // being replayed.
+  assert.ok(
+    !/Chrome|Safari|Macintosh|AppleWebKit/i.test(capturedA2aHeaders['user-agent'] || ''),
+    `the browser's User-Agent must not be forwarded, got ${capturedA2aHeaders['user-agent']}`
+  );
+  for (const forbidden of [
+    'origin',
+    'referer',
+    'cookie',
+    'sec-fetch-site',
+    'sec-fetch-mode',
+    'sec-fetch-dest',
+    'sec-ch-ua',
+    'sec-ch-ua-mobile',
+    'sec-ch-ua-platform',
+    'accept-language',
+    'cache-control',
+    'pragma',
+    // XSRF guards Incorta's cookie-authenticated UI; this call is
+    // Bearer-authenticated and holds no cookies, so there is nothing to protect.
+    'x-xsrf-token',
+  ]) {
+    assert.ok(
+      !capturedA2aHeaders[forbidden],
+      `browser-only header "${forbidden}" must not reach Incorta`
+    );
+  }
+  assert.ok(
+    capturedA2aHeaders['x-a2a-extensions'],
+    'the x-a2a-extensions header should still be sent'
+  );
+
+  // JSON-RPC envelope, matching the documented request
+  assert.strictEqual(capturedA2aBody.jsonrpc, '2.0');
+  assert.strictEqual(capturedA2aBody.method, 'message/send');
+  assert.strictEqual(capturedA2aBody.blocking, true);
+  assert.deepStrictEqual(capturedA2aBody.params.message.parts, [
+    { kind: 'text', text: 'hi' },
+  ]);
+  assert.ok(
+    capturedA2aBody.params.message.metadata.conversation_context,
+    'conversation_context should be sent with the message'
+  );
+  assert.strictEqual(capturedA2aBody.params.message.metadata.conversation_context.client, 'general');
+
+  // The route passes the reply through and reports the trace-id for support
+  assert.strictEqual(chatBody.reply.jsonrpc, '2.0', 'the JSON-RPC reply should be passed through');
+  assert.strictEqual(chatBody.traceId, INCORTA_TRACE_ID, 'the trace-id should be reported');
+  assert.ok(chatBody.contextId, 'the conversation id should be returned for the client');
+  assert.ok(
+    chatBody.reply.result.parts[0].text === 'Echo: hi',
+    `agent reply should reach the client, got ${JSON.stringify(chatBody.reply)}`
+  );
+  console.log('✓ chat posts a JSON-RPC message/send with only the Incorta Bearer token');
+
+  // The conversation id must persist across messages, or the agent treats every
+  // message as a brand-new conversation and loses the thread.
+  const second = await fetch(`http://localhost:${APP_PORT}/api/incorta/chat`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'and then?' }),
+  });
+  const secondBody = await second.json();
+  assert.strictEqual(
+    secondBody.contextId,
+    chatBody.contextId,
+    'consecutive messages should share one Incorta conversation'
+  );
+  assert.ok(
+    capturedA2aBody.id !== chatBody.reply.id,
+    'the JSON-RPC id should increment per request'
+  );
+  console.log('✓ conversation id persists across messages and the JSON-RPC id increments');
+
+  // Empty input is rejected before any token is spent or Incorta is called
+  const lastGoodChatBody = JSON.parse(JSON.stringify(capturedA2aBody));
+  const empty = await fetch(`http://localhost:${APP_PORT}/api/incorta/chat`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: '   ' }),
+  });
+  assert.strictEqual(empty.status, 400, 'an empty message should be rejected');
+  // The mock's last capture must still be the previous good message: a rejected
+  // request would overwrite it. Compare against the whole body, not a substring
+  // of it, so a new call with different text is caught too.
+  assert.deepStrictEqual(
+    capturedA2aBody,
+    lastGoodChatBody,
+    'a rejected message must not reach Incorta'
+  );
+  console.log('✓ empty chat messages are rejected without calling Incorta');
+
+  // Copilot entitlement failures are 500s with a readable Incorta message and a
+  // trace-id; the route must surface both rather than a bare status code.
+  failNextChat = true;
+  const denied = await fetch(`http://localhost:${APP_PORT}/api/incorta/chat`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'hi again' }),
+  });
+  const deniedBody = await denied.json();
+  assert.strictEqual(denied.status, 500, 'an Incorta 500 should be passed through');
+  assert.strictEqual(deniedBody.traceId, INCORTA_ERROR_TRACE_ID);
+  assert.ok(
+    deniedBody.details.message.includes('INC_05000301'),
+    `Incorta's own message should be surfaced, got ${JSON.stringify(deniedBody)}`
+  );
+  console.log('✓ Copilot permission errors surface Incorta\'s message and trace-id');
+
+  // 7b. replyText() is what makes the chat usable: the agent's reply can land
+  // under several shapes depending on which output extensions the server applied,
+  // so it has to find the text in any of them and fall back to raw JSON rather
+  // than rendering an empty bubble. Extracted from the served page and actually
+  // executed, so this tests the shipped code and not a copy of it.
+  const replyOf = makeReplyTextRunner(homeHtml);
+  assert.strictEqual(
+    replyOf({ jsonrpc: '2.0', result: { parts: [{ kind: 'text', text: 'from parts' }] } }),
+    'from parts',
+    'should read the text out of result.parts'
+  );
+  assert.strictEqual(
+    replyOf({ result: { message: { text: 'from message.text' } } }),
+    'from message.text',
+    'should read the text out of result.message.text'
+  );
+  assert.strictEqual(replyOf({ result: { text: 'from text' } }), 'from text');
+  assert.strictEqual(
+    replyOf({ result: { artifacts: [{ name: 'artifact one' }] } }),
+    'artifact one',
+    'should fall back to artifact text'
+  );
+  assert.strictEqual(
+    replyOf({ error: { code: -32603, message: 'internal error' } }),
+    'Error -32603: internal error',
+    'a JSON-RPC error object should render readably, not as [object Object]'
+  );
+  // An unrecognized shape falls back to the JSON so the user sees the payload
+  // instead of an empty bubble.
+  assert.ok(
+    replyOf({ result: { somethingNew: 'shape drift' } }).includes('shape drift'),
+    'an unknown response shape should fall back to the raw JSON'
+  );
+  console.log('✓ chat reply rendering handles every JSON-RPC result shape');
+
+  assertInlineScriptParses(homeHtml);
+  console.log('✓ the logged-in page\'s inline script parses as JavaScript');
 
   // 7b. The home page has to render those four columns from the real field
   // names, not a hand-written set. Evaluated in a minimal DOM shim so the

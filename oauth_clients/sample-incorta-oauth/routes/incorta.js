@@ -1,7 +1,13 @@
 const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto');
 
 const { incortaApiUrl } = require('../lib/oidc-incorta');
+const {
+  buildMessagePayload,
+  buildHeaders,
+  agentUrl,
+} = require('../lib/incorta-a2a');
 
 /**
  * Incorta API routes
@@ -115,6 +121,108 @@ function createIncortaRouter(incorta) {
       res.status(500).json({ error: err.message });
     }
   }
+
+  /**
+   * Handler: forward one chat message to Incorta's Copilot A2A agent.
+   *
+   * Equivalent to the request the Incorta Copilot UI makes from the browser:
+   *
+   * curl -X 'POST' 'http://localhost/incorta/api/v2/<tenant>/copilot/a2a/agent/smart-agent' \
+   *   -H 'accept: application/json' \
+   *   -H 'content-type: application/json' \
+   *   -H 'authorization: Bearer <incorta access token>' \
+   *   -d '{"blocking":true,"jsonrpc":"2.0","method":"message/send", ... }'
+   *
+   * The conversation id lives in the session, so consecutive messages from one
+   * browser tab land in the same Incorta conversation. The JSON-RPC id
+   * increments per call, as the spec requires for correlating responses.
+   */
+  async function chatHandler(req, res) {
+    try {
+      const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+
+      if (!text) {
+        return res.status(400).json({
+          error: 'Message text is required',
+        });
+      }
+
+      // Bound the length so a pasted document cannot turn one click into an
+      // unbounded agent call. Incorta's own UI caps input well below this.
+      const maxLength = Number(process.env.INCORTA_A2A_MAX_MESSAGE_LENGTH) || 8000;
+      if (text.length > maxLength) {
+        return res.status(400).json({
+          error: `Message is too long (${text.length} characters, limit ${maxLength})`,
+        });
+      }
+
+      const accessToken = await getIncortaToken(req);
+
+      if (!req.session.a2a) {
+        req.session.a2a = {
+          contextId: crypto.randomUUID(),
+          rpcId: 0,
+        };
+      }
+      req.session.a2a.rpcId += 1;
+
+      const payload = buildMessagePayload({
+        text,
+        messageId: crypto.randomUUID(),
+        contextId: req.session.a2a.contextId,
+        rpcId: req.session.a2a.rpcId,
+      });
+
+      const started = Date.now();
+      const response = await axios.post(agentUrl(), payload, {
+        headers: buildHeaders(accessToken),
+        // Surfaces Incorta's own JSON error body instead of an axios throw
+        validateStatus: () => true,
+        // A blocking agent call can take a while; axios defaults to none, but
+        // being explicit keeps the failure mode a clear 504 rather than a hang.
+        timeout: Number(process.env.INCORTA_A2A_TIMEOUT_MS) || 120000,
+      });
+
+      const traceId = response.headers['trace-id'];
+      const durationMs = Date.now() - started;
+
+      if (response.status >= 400) {
+        // Incorta reports permission and configuration problems as 500s with a
+        // readable message (e.g. INC_05000301 "You do not have the necessary
+        // permissions to access the Copilot"), so its text is passed through
+        // rather than replaced by a generic error.
+        console.error(
+          `✗ Incorta A2A error (${response.status}) after ${durationMs}ms:`,
+          JSON.stringify(response.data)
+        );
+        console.error(`  Incorta trace-id: ${traceId || '(none returned)'}`);
+
+        return res.status(response.status).json({
+          error: `Incorta Copilot returned ${response.status}`,
+          traceId: traceId || null,
+          details: response.data,
+          durationMs,
+        });
+      }
+
+      console.log(
+        `✓ Incorta A2A message sent for ${req.session.user.email}` +
+          `${traceId ? ` (trace-id: ${traceId})` : ''} in ${durationMs}ms`
+      );
+
+      res.json({
+        reply: response.data,
+        contextId: req.session.a2a.contextId,
+        traceId: traceId || null,
+        durationMs,
+      });
+    } catch (err) {
+      console.error('✗ Incorta A2A request failed:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  router.post('/chat', requireAuth, chatHandler);
 
   router.post('/schemas/list', requireAuth, schemaListHandler);
   // Convenience GET alias for clicking a link in the browser

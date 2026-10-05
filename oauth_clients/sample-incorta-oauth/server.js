@@ -112,6 +112,17 @@ app.get('/', (req, res) => {
     tbody tr:last-child td { border-bottom: none; }
     td:first-child { font-weight: 600; }
     .btn[disabled] { opacity: 0.6; cursor: default; }
+    .chat-log { border: 1px solid #e5e5e5; border-radius: 6px; padding: 10px; max-height: 420px; overflow-y: auto; background: #fafafa; margin-bottom: 10px; }
+    .bubble { padding: 8px 12px; border-radius: 8px; margin-bottom: 8px; font-size: 14px; white-space: pre-wrap; word-break: break-word; max-width: 85%; }
+    .bubble.user { background: #0073e6; color: #fff; margin-left: auto; }
+    .bubble.agent { background: #fff; border: 1px solid #e5e5e5; }
+    .bubble.agent.pending { color: #888; font-style: italic; }
+    .bubble.agent.error { background: #fdecea; border-color: #f5c2c0; color: #8a1c14; }
+    .chat-form { display: flex; gap: 8px; }
+    .chat-form input { flex: 1; padding: 10px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 15px; }
+    .chat-form input:focus { outline: 2px solid #0073e6; outline-offset: -1px; }
+    .chat-log details { font-size: 13px; margin-bottom: 8px; }
+    .chat-log summary { cursor: pointer; }
   </style>
 </head>
 <body>
@@ -128,6 +139,21 @@ app.get('/', (req, res) => {
            <a class="btn secondary" href="/logout" style="margin-left:8px; text-decoration:none;">Logout</a>
          </div>
          <div id="output"></div>
+
+           <div class="card">
+             <h3>Chat with Incorta Copilot</h3>
+             <p class="muted">Messages go to the Incorta Copilot A2A agent
+               (<code>smart-agent</code>) using the Incorta access token issued
+               for ${escapeHtml(user.email)}.</p>
+             <div id="chatLog" class="chat-log"></div>
+             <form id="chatForm" class="chat-form" onsubmit="return sendChat(event)">
+               <input id="chatInput" type="text" autocomplete="off"
+                 placeholder="Ask about your Incorta data&hellip; (Enter to send)" />
+               <button class="btn" type="submit" id="chatSend">Send</button>
+               <button class="btn secondary" type="button" id="chatClear"
+                 onclick="clearChat()">Clear</button>
+             </form>
+           </div>
          <script>
            // Escape before any innerHTML assignment. Schema names, owners and
            // descriptions come from the server and are not sanitized, so this is
@@ -181,7 +207,153 @@ app.get('/', (req, res) => {
                '</div>';
            }
 
-           async function callIncorta() {
+           // --- Incorta Copilot chat ---
+
+            // The A2A response is a JSON-RPC envelope; the agent's actual reply
+            // can sit under several shapes depending on which output extensions
+            // the server applied, so collect text from all of them rather than
+            // assuming one. Falls back to the raw JSON so a response shape
+            // change shows the user the payload instead of an empty bubble.
+            function replyText(data) {
+              if (typeof data === 'string') return data;
+              if (!data || typeof data !== 'object') return '';
+
+              var candidates = [];
+
+              // JSON-RPC 2.0 puts the result in \`result\`; a bare object with no
+              // envelope means the server answered without wrapping.
+              var result = data.result || data;
+
+              candidates.push(result.text);
+              candidates.push(result.message && result.message.text);
+
+              // MessagePart shape: an array of parts each carrying text.
+              if (Array.isArray(result.parts)) {
+                candidates.push(result.parts.map(function (p) {
+                  return p && p.text ? p.text : '';
+                }).join('\\n'));
+              }
+
+              // Artifacts / structured output that may hold prose.
+              if (result.artifacts) {
+                candidates.push(
+                  result.artifacts.map(function (a) {
+                    if (!a) return '';
+                    if (typeof a.text === 'string') return a.text;
+                    return a.name || a.description || '';
+                  }).join('\\n')
+                );
+              }
+
+              for (var i = 0; i < candidates.length; i++) {
+                if (typeof candidates[i] === 'string' && candidates[i].trim()) {
+                  return candidates[i];
+                }
+              }
+
+              // JSON-RPC error object
+              if (data.error) {
+                return 'Error ' + (data.error.code || '') + ': ' +
+                  (data.error.message || JSON.stringify(data.error));
+              }
+
+              return JSON.stringify(data, null, 2);
+            }
+
+            function addBubble(text, who, raw) {
+              var log = document.getElementById('chatLog');
+              var el = document.createElement('div');
+              el.className = 'bubble ' + who;
+              // Agent output is rendered as text, never HTML: it contains
+              // table/HTML fragments from the datasets, and interpreting it
+              // would let Incorta content inject markup into this page.
+              el.textContent = text;
+              log.appendChild(el);
+
+              if (raw) {
+                var details = document.createElement('details');
+                details.className = 'muted';
+                var summary = document.createElement('summary');
+                summary.textContent = 'Raw JSON-RPC response';
+                var pre = document.createElement('pre');
+                pre.textContent = raw;
+                details.appendChild(summary);
+                details.appendChild(pre);
+                log.appendChild(details);
+              }
+              log.scrollTop = log.scrollHeight;
+            }
+
+            async function sendChat(event) {
+              if (event) event.preventDefault();
+
+              var input = document.getElementById('chatInput');
+              var send = document.getElementById('chatSend');
+              var text = input.value.trim();
+              if (!text) return false;
+
+              addBubble(text, 'user');
+              input.value = '';
+              send.disabled = true;
+              send.textContent = 'Sending…';
+              addBubble('…', 'agent pending');
+
+              try {
+                var res = await fetch('/api/incorta/chat', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ text: text })
+                });
+                var data = await res.json();
+
+                // Replace the pending bubble in place rather than appending,
+                // so the transcript does not keep the ellipsis around.
+                var log = document.getElementById('chatLog');
+                var pending = log.querySelector('.agent.pending');
+                if (pending) pending.remove();
+
+                if (!res.ok) {
+                  var trace = data.traceId
+                    ? '\\n\\nIncorta trace-id: ' + data.traceId : '';
+                  var detail = '';
+                  if (data.details) {
+                    // Incorta returns a readable message here, e.g. INC_05000301
+                    // "You do not have the necessary permissions to access the
+                    // Copilot", which is more useful than a bare status code.
+                    detail = '\\n\\n' + (
+                      typeof data.details === 'string'
+                        ? data.details
+                        : (data.details.message || JSON.stringify(data.details))
+                    );
+                  }
+                  addBubble((data.error || ('HTTP ' + res.status)) + detail + trace, 'agent error');
+                  return false;
+                }
+
+                addBubble(
+                  replyText(data.reply),
+                  'agent',
+                  JSON.stringify(data.reply, null, 2)
+                );
+              } catch (e) {
+                var log2 = document.getElementById('chatLog');
+                var p2 = log2.querySelector('.agent.pending');
+                if (p2) p2.remove();
+                addBubble('Request failed: ' + e.message, 'agent error');
+              } finally {
+                send.disabled = false;
+                send.textContent = 'Send';
+                input.focus();
+              }
+              return false;
+            }
+
+            function clearChat() {
+              document.getElementById('chatLog').innerHTML = '';
+              document.getElementById('chatInput').focus();
+            }
+
+            async function callIncorta() {
              const out = document.getElementById('output');
              const btn = document.getElementById('callBtn');
              btn.disabled = true;

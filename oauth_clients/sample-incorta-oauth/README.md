@@ -157,6 +157,7 @@ The app will be available at [http://localhost:3000](http://localhost:3000).
 - **Keycloak**: Same Authorization Code + PKCE flow. Supports both confidential and public clients; with a public client no secret is sent, and PKCE is what protects the code exchange. Keycloak only returns `email` when the user has one set on their profile.
 - **One callback, two providers**: Fusion Auth and Keycloak are both registered with `${APP_BASE_URL}/callback`, so `/callback` routes to whichever provider started the flow based on the provider recorded in the session.
 - **Incorta**: Uses Client Credentials flow. The authenticated user's email (from the IdP's ID token) is passed as the `for_user` parameter in the token request.
+- **Copilot A2A**: The chat window calls Incorta's agent-to-agent `message/send` JSON-RPC endpoint server-side, reusing the cached Incorta token. The IdP access token (Keycloak/Fusion Auth) is never sent to Incorta.
 - **Session Management**: Uses `express-session` to store authentication state. In production, consider using a secure session store.
 - **Security**: The app validates ID tokens, uses server-side token exchange, and stores secrets in environment variables.
 - **Access token logging**: Every access token the app receives (Incorta, Keycloak, Fusion Auth) is logged once, when it arrives. By default only a masked fingerprint is printed — enough to see whether a token rotated or the cached one is the one you expect, but not usable as a credential. Set `LOG_ACCESS_TOKENS=true` to log the full value; the app then prints a one-time warning, because tokens in logs are a real credential leak (logs get shipped, attached to bug reports, and kept for months). Keep it off outside local debugging.
@@ -175,6 +176,46 @@ It is derived from `APP_BASE_URL` + `/callback`. If you change `APP_BASE_URL`
 or `APP_PORT`, update both providers to match. The app prints
 the value it expects on startup.
 
+## Chat with the Incorta Copilot
+
+The logged-in page has a chat window that posts to Incorta's Copilot A2A
+(`agent-to-agent`) endpoint:
+
+```
+{INCORTA_BASE_URL}/incorta/api/v2/{INCORTA_TENANT}/copilot/a2a/agent/{INCORTA_A2A_AGENT}
+```
+
+The browser posts the message text to `/api/incorta/chat`; the **server** makes
+the Incorta call, attaching the Incorta access token obtained from the
+Client Credentials exchange. The token never reaches the browser.
+
+That call sends only three headers — `accept`, `content-type`, and
+`authorization` — plus `x-a2a-extensions`. The `User-Agent`, `Origin`, `Referer`,
+`sec-ch-ua*`, `sec-fetch-*`, and `accept-language` headers in a browser-recorded
+curl describe the page that made the request, not the API contract, so none of
+them are forwarded. `x-xsrf-token` is deliberately dropped too: it protects
+Incorta's cookie-authenticated UI against CSRF, and this call is
+Bearer-authenticated with no cookies, so there is no ambient credential to
+protect.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `INCORTA_A2A_AGENT` | `smart-agent` | Agent name in the URL |
+| `INCORTA_A2A_DATASETS` | *(empty)* | Dataset grounding, `SCHEMA` or `SCHEMA:TABLE`, comma separated |
+| `INCORTA_A2A_EXTENSIONS` | *(four defaults)* | `x-a2a-extensions` value; set empty to send no header |
+| `INCORTA_A2A_VERBOSITY` | `detailed` | Agent verbosity |
+| `INCORTA_A2A_ENABLE_SUMMARY` | `true` | Whether the agent may summarize |
+| `INCORTA_A2A_TIMEOUT_MS` | `120000` | Per-message timeout |
+| `INCORTA_A2A_MAX_MESSAGE_LENGTH` | `8000` | Input length cap |
+
+The conversation id lives in the session, so messages from one browser tab stay
+in one Incorta conversation. `current_date` is stamped per message, so relative
+dates like "last quarter" resolve against the right day.
+
+If a message comes back with a response shape the renderer does not recognize,
+the bubble shows the raw JSON instead of appearing empty. Agent output is
+inserted as text, never HTML.
+
 ## Routes
 
 | Method | Path                     | Description                                    |
@@ -186,7 +227,12 @@ the value it expects on startup.
 | GET    | `/logout`                | Destroys the session                           |
 | GET    | `/me`                    | JSON with the current session user             |
 | POST   | `/api/incorta/schemas/list` | Calls Incorta's schema list API (auth required) |
+| POST   | `/api/incorta/chat`      | Sends one message to the Incorta Copilot A2A agent (auth required) |
 | GET    | `/health`                | Health check                                   |
+
+`POST /api/incorta/chat` takes `{ "text": "..." }` and returns
+`{ reply, contextId, traceId, durationMs }`. On an Incorta error it returns
+Incorta's own status, message, and `trace-id`.
 
 ## Tests
 
@@ -202,6 +248,13 @@ S256, the exact `for_user` email on the Incorta token request, the
 `Authorization: Bearer` header on the API call, token caching, CSRF state
 rejection, and logout. It uses high ports (19011/18080/13000) so it will not
 collide with your real Fusion Auth, Incorta, or a running dev instance.
+
+It also covers the chat window: that the A2A request carries the Incorta token
+and none of the browser-only headers, that the JSON-RPC envelope is well formed,
+that the conversation id persists while the JSON-RPC id increments, that empty
+input is rejected before Incorta is called, that a Copilot permission error
+surfaces Incorta's own message and `trace-id`, and that the page's inline script
+actually parses as JavaScript.
 
 ## Troubleshooting
 

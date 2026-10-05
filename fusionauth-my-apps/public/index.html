@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>My Apps</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <h1>My Apps</h1>
+      </div>
+      <div class="identity" id="identity" hidden>
+        <span class="identity-name" id="identityName"></span>
+        <a class="btn btn-ghost" href="/logout">Sign out</a>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <section id="signedOut" class="panel">
+        <h2>Sign in to see your applications</h2>
+        <p class="muted">
+          Your applications are assigned to you in FusionAuth. Sign in and they
+          appear here.
+        </p>
+        <a class="btn btn-primary" href="/login">Sign in</a>
+      </section>
+
+      <section id="loading" class="panel" hidden>
+        <p class="muted">Loading your applications&hellip;</p>
+      </section>
+
+      <section id="error" class="panel panel-error" hidden>
+        <h2>Could not load your applications</h2>
+        <p class="muted" id="errorDetail"></p>
+        <button class="btn btn-ghost" onclick="loadApps()">Try again</button>
+      </section>
+
+      <section id="gridSection" hidden>
+        <h2 class="grid-heading" id="gridHeading">Your applications</h2>
+        <div class="grid" id="grid"></div>
+        <p class="empty" id="empty" hidden>
+          You have not been assigned any applications yet. Ask an administrator
+          to assign one in FusionAuth.
+        </p>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

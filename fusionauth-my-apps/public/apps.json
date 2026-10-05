@@ -1,0 +1,9 @@
+{
+  "_comment": "Optional per-application tile overrides. FusionAuth application objects have no logoUrl field, so tiles otherwise fall back to generated initials on a deterministic colour. Add an entry keyed by applicationId to supply a real logo and/or a friendlier subtitle. Example:",
+  "_example": {
+    "59de197e-600b-4612-b2da-ed1f9624a8f6": {
+      "logo": "/logos/incorta.svg",
+      "description": "Analytics platform"
+    }
+  }
+}

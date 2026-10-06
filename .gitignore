@@ -1,1 +1,4 @@
 .idea
+clients.json
+**/__pycache__/
+**/data/**

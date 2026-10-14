@@ -1,13 +1,9 @@
 const express = require('express');
-const axios = require('axios');
 const crypto = require('crypto');
 
-const { incortaApiUrl } = require('../lib/oidc-incorta');
-const {
-  buildMessagePayload,
-  buildHeaders,
-  agentUrl,
-} = require('../lib/incorta-a2a');
+const { listSchemas } = require('../lib/incorta-schemas');
+const { sendMessage } = require('../lib/incorta-a2a-client');
+const { requireAuth, getIncortaToken } = require('../lib/incorta-session');
 
 /**
  * Incorta API routes
@@ -16,81 +12,16 @@ const {
 function createIncortaRouter(incorta) {
   const router = express.Router();
 
-  /**
-   * Middleware: require an authenticated user
-   */
-  function requireAuth(req, res, next) {
-    if (!req.session.user) {
-      return res.status(401).json({
-        error: 'Not authenticated',
-        message: 'Login with Keycloak first',
-      });
-    }
-    next();
-  }
+  const getToken = (req) => getIncortaToken(req, incorta);
 
   /**
-   * Helper: get an Incorta access token for the authenticated user, using the
-   * session cache when it is still valid.
-   */
-  async function getIncortaToken(req) {
-    const userEmail = req.session.user.email;
-    const cached = req.session.incortaToken;
-
-    const now = Math.floor(Date.now() / 1000);
-    if (cached && cached.expiresAt && cached.expiresAt > now + 30) {
-      return cached.accessToken;
-    }
-
-    const tokenData = await incorta.getAccessToken(userEmail);
-    req.session.incortaToken = {
-      accessToken: tokenData.access_token,
-      expiresAt: now + (tokenData.expires_in || 300),
-    };
-    return tokenData.access_token;
-  }
-
-  /**
-   * Handler: call Incorta's schema list API for the configured tenant.
-   *
-   * The tenant (project) comes from INCORTA_TENANT, falling back to the last
-   * segment of INCORTA_OIDC_ISSUER. With INCORTA_TENANT=demo_keycloak this is:
-   *
-   * curl -X 'POST' \
-   *   'http://localhost/incorta/api/v2/demo_keycloak/schema/list?schemaType=ALL' \
-   *   -H 'accept: application/json' \
-   *   -H 'Content-Type: application/json' \
-   *   -d '{"limit": 0, "offset": 0, "sortBy": "NAME_ASC"}'
+   * Handler: list the schemas for the configured tenant.
    */
   async function schemaListHandler(req, res) {
     try {
-      const accessToken = await getIncortaToken(req);
-
-      const response = await axios.post(
-        incortaApiUrl('/schema/list?schemaType=ALL'),
-        {
-          limit: 0,
-          offset: 0,
-          sortBy: 'NAME_ASC',
-        },
-        {
-          headers: {
-            accept: 'application/json',
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          // Incorta may return 4xx/5xx with a JSON error body worth surfacing
-          validateStatus: () => true,
-        }
-      );
-
-      // Incorta stamps every API response with a `trace-id`, including 4xx/5xx
-      // ones. It is the handle to quote when reporting a problem to Incorta
-      // support, so log it on both the success and error paths rather than only
-      // when things go wrong - by the time an error shows up you want the id
-      // that correlates with the server-side log. Verified present on both
-      // 200 and 500 responses from Incorta's own nginx.
-      const traceId = response.headers['trace-id'];
+      const accessToken = await getToken(req);
+      const response = await listSchemas({ accessToken });
+      const { traceId } = response;
 
       if (response.status >= 400) {
         console.error(
@@ -131,9 +62,10 @@ function createIncortaRouter(incorta) {
    *   -H 'accept: application/json' \
    *   -H 'content-type: application/json' \
    *   -H 'authorization: Bearer <incorta access token>' \
-   *   -d '{"blocking":true,"jsonrpc":"2.0","method":"message/send", ... }'
+   *   -d '{"jsonrpc":"2.0","method":"message/send","params":{...},"id":1}'
    *
-   * The conversation id lives in the session, so consecutive messages from one
+   * The first message carries no conversation id; Incorta assigns one in its
+   * reply and it is kept in the session and sent on later messages, so consecutive messages from one
    * browser tab land in the same Incorta conversation. The JSON-RPC id
    * increments per call, as the spec requires for correlating responses.
    */
@@ -156,44 +88,35 @@ function createIncortaRouter(incorta) {
         });
       }
 
-      const accessToken = await getIncortaToken(req);
+      const accessToken = await getToken(req);
 
       if (!req.session.a2a) {
-        req.session.a2a = {
-          contextId: crypto.randomUUID(),
-          rpcId: 0,
-        };
+        req.session.a2a = { contextId: undefined, rpcId: 0 };
       }
       req.session.a2a.rpcId += 1;
 
-      const payload = buildMessagePayload({
+      const response = await sendMessage({
+        accessToken,
         text,
         messageId: crypto.randomUUID(),
         contextId: req.session.a2a.contextId,
         rpcId: req.session.a2a.rpcId,
       });
+      const { traceId, durationMs } = response;
 
-      const started = Date.now();
-      const response = await axios.post(agentUrl(), payload, {
-        headers: buildHeaders(accessToken),
-        // Surfaces Incorta's own JSON error body instead of an axios throw
-        validateStatus: () => true,
-        // A blocking agent call can take a while; axios defaults to none, but
-        // being explicit keeps the failure mode a clear 504 rather than a hang.
-        timeout: Number(process.env.INCORTA_A2A_TIMEOUT_MS) || 120000,
-      });
-
-      const traceId = response.headers['trace-id'];
-      const durationMs = Date.now() - started;
+      // Remember the conversation id Incorta assigned, to continue the thread
+      if (!req.session.a2a.contextId && response.status < 400) {
+        req.session.a2a.contextId = response.data?.result?.contextId;
+      }
 
       if (response.status >= 400) {
         // Incorta reports permission and configuration problems as 500s with a
         // readable message (e.g. INC_05000301 "You do not have the necessary
         // permissions to access the Copilot"), so its text is passed through
-        // rather than replaced by a generic error.
+        // rather than replaced by a generic error. The body itself is already
+        // logged by sendMessage.
         console.error(
-          `✗ Incorta A2A error (${response.status}) after ${durationMs}ms:`,
-          JSON.stringify(response.data)
+          `✗ Incorta A2A error (${response.status}) after ${durationMs}ms`
         );
         console.error(`  Incorta trace-id: ${traceId || '(none returned)'}`);
 

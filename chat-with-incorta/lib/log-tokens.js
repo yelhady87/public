@@ -45,7 +45,7 @@ function maskToken(token) {
 /**
  * Log an access token as it is received.
  *
- * @param {string} label - where the token came from, e.g. 'Incorta' or 'Keycloak'
+ * @param {string} label - where the token came from, e.g. 'Incorta' or 'SSO'
  * @param {string} token - the access token
  * @param {object} [meta] - extra context (subject, expiry, for_user, ...)
  */

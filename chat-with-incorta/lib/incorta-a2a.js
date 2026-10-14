@@ -36,38 +36,12 @@ const DEFAULT_EXTENSIONS = [
 ];
 
 /**
- * Parse INCORTA_A2A_DATASETS into the dataset shape the agent expects.
- *
- * Accepted forms, comma separated:
- *   HR              -> { type: 'business_view', data: { schema_name: 'HR' } }
- *   HR:Dept         -> { type: 'business_view', data: { schema_name: 'HR', table_name: 'Dept' } }
- *
- * The table half is optional so the same variable covers a schema-wide context
- * and a single-table one. An unset or empty value yields no datasets at all,
- * which is a valid request: it asks the agent to answer without dataset
- * grounding rather than failing.
+ * `client_context.params` selecting the model, from INCORTA_A2A_MODEL_KEY.
+ * Omitted when unset, so Incorta uses its own default model.
  */
-function resolveDatasets() {
-  const raw = process.env.INCORTA_A2A_DATASETS || '';
-  const datasets = [];
-
-  for (const entry of raw.split(',')) {
-    const trimmed = entry.trim();
-    if (!trimmed) continue;
-
-    const sep = trimmed.search(/[:/]/);
-    const schema = sep === -1 ? trimmed : trimmed.slice(0, sep);
-    const table = sep === -1 ? '' : trimmed.slice(sep + 1).trim();
-
-    if (!schema) continue;
-
-    const data = { schema_name: schema };
-    if (table) data.table_name = table;
-
-    datasets.push({ type: 'business_view', data });
-  }
-
-  return datasets;
+function modelKeyParams() {
+  const value = (process.env.INCORTA_A2A_MODEL_KEY || '').trim();
+  return value ? { params: [{ key: 'model_key', value }] } : {};
 }
 
 /**
@@ -78,19 +52,17 @@ function resolveDatasets() {
  * would make the agent answer relative to the wrong day.
  */
 function buildConversationContext() {
-  const context = {
+  return {
     client: process.env.INCORTA_A2A_CLIENT || 'general',
     current_date: new Date().toISOString().slice(0, 19).replace('T', ' '),
     client_context: {
-      datasets: resolveDatasets(),
+      ...modelKeyParams(),
       enable_summary: !/^(0|false|no|off)$/i.test(
         String(process.env.INCORTA_A2A_ENABLE_SUMMARY || '').trim()
       ),
       verbosity: process.env.INCORTA_A2A_VERBOSITY || 'detailed',
     },
   };
-
-  return context;
 }
 
 /**
@@ -99,30 +71,39 @@ function buildConversationContext() {
  * @param {object} options
  * @param {string} options.text - the user's message
  * @param {string} options.messageId - unique id for this message
- * @param {string} options.contextId - conversation this message belongs to
- * @param {number} options.rpcId - JSON-RPC request id, incremented per call
+ * @param {string} [options.contextId] - conversation this message belongs to.
+ *   Omitted on the first message; Incorta assigns one in its reply.
+ * @param {number} options.rpcId - JSON-RPC request id
+ * @param {boolean} [options.blocking=true] - ask for a synchronous reply. When
+ *   false no `configuration` is sent and Incorta answers with a task to poll.
  * @returns {object} the request body
  */
-function buildMessagePayload({ text, messageId, contextId, rpcId }) {
+function buildMessagePayload({ text, messageId, contextId, rpcId, blocking = true }) {
+  const params = {
+    message: {
+      messageId,
+      role: 'user',
+      kind: 'message',
+      parts: [{ kind: 'text', text }],
+      metadata: {
+        conversation_context: buildConversationContext(),
+      },
+    },
+  };
+
+  if (blocking) {
+    // Ask for a synchronous reply
+    params.configuration = { blocking: true };
+  }
+
+  if (contextId) {
+    params.contextId = contextId;
+  }
+
   return {
-    // A blocking call keeps this a simple request/response exchange. Incorta's
-    // UI streams, but the browser-side fetch in this app does not, so a
-    // blocking:true request is the honest match for what it can consume.
-    blocking: true,
     jsonrpc: '2.0',
     method: 'message/send',
-    params: {
-      message: {
-        messageId,
-        role: 'user',
-        kind: 'message',
-        parts: [{ kind: 'text', text }],
-        metadata: {
-          conversation_context: buildConversationContext(),
-        },
-      },
-      contextId,
-    },
+    params,
     id: rpcId,
   };
 }
@@ -174,7 +155,6 @@ function agentUrl(agentName) {
 
 module.exports = {
   DEFAULT_EXTENSIONS,
-  resolveDatasets,
   buildConversationContext,
   buildMessagePayload,
   buildHeaders,

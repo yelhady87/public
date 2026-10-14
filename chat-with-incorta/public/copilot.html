@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Incorta Copilot</title>
+  <style>
+    body { margin: 0; font-family: -apple-system, system-ui, sans-serif; background: #fcfcfc; color: #222; }
+    header { display: flex; align-items: center; gap: 12px; padding: 12px 24px; border-bottom: 1px solid #e5e5e5; background: #fff; }
+    header h1 { font-size: 18px; margin: 0; flex: 1; }
+    a, button { font: inherit; }
+    .link { color: #3f48a0; text-decoration: none; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 20px 140px; }
+    .turn { margin-bottom: 28px; }
+    .user { background: #3f48a0; color: #fff; padding: 10px 18px; border-radius: 18px; margin-left: auto; width: fit-content; max-width: 80%; white-space: pre-wrap; word-break: break-word; }
+    .agent { margin-top: 18px; }
+    .thoughts > summary { cursor: pointer; color: #6b7280; display: flex; align-items: center; gap: 8px; list-style: none; }
+    .thoughts > summary::-webkit-details-marker { display: none; }
+    .dot { width: 14px; height: 14px; border-radius: 50%; border: 3px solid #3f48a0; border-top-color: #c9ccee; box-sizing: border-box; }
+    .running .dot { animation: spin 0.9s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .running .dot { animation: none; } }
+    .steps { margin: 8px 0 0 22px; padding: 0; color: #4b5563; font-size: 14px; }
+    .steps li { margin: 4px 0; }
+    .steps .st-error { color: #9b1c1c; }
+    .steps small { color: #6b7280; }
+    .card { margin-top: 12px; background: #f5f5f5; border: 1px solid #e5e5e5; border-radius: 12px; padding: 16px 20px; white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
+    .card.error { background: #fdf2f2; border-color: #f5c2c0; color: #7a1c14; }
+    .actions { margin-top: 12px; display: flex; gap: 10px; white-space: normal; }
+    .actions button { background: #fff; border: 1px solid #d1d5db; border-radius: 6px; padding: 8px 16px; cursor: pointer; }
+    .actions button:focus-visible, .btn:focus-visible, textarea:focus-visible { outline: 2px solid #3f48a0; outline-offset: 2px; }
+    pre.details { margin: 12px 0 0; padding: 10px; background: #fff; border: 1px solid #e5e5e5; border-radius: 6px; font-size: 12px; overflow: auto; max-height: 240px; white-space: pre-wrap; }
+    form { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; border-top: 1px solid #e5e5e5; padding: 14px 20px; }
+    .row { max-width: 860px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; }
+    textarea { flex: 1; resize: none; padding: 10px 12px; border: 1px solid #ccc; border-radius: 8px; font: inherit; min-height: 44px; box-sizing: border-box; }
+    .btn { background: #3f48a0; color: #fff; border: 0; border-radius: 8px; padding: 11px 20px; cursor: pointer; }
+    .btn[disabled], textarea[disabled] { opacity: 0.6; cursor: default; }
+    .secondary { background: #fff; color: #333; border: 1px solid #d1d5db; }
+    label.sr { position: absolute; left: -9999px; }
+  </style>
+</head>
+<body data-poll-ms="__POLL_MS__" data-timeout-ms="__TIMEOUT_MS__">
+  <header>
+    <h1>Incorta Copilot</h1>
+    <a class="link" href="/">&larr; Home</a>
+    <button type="button" id="newChat" class="btn secondary">New chat</button>
+  </header>
+  <main id="transcript" aria-live="polite"></main>
+  <form id="form">
+    <div class="row">
+      <label class="sr" for="input">Message</label>
+      <textarea id="input" rows="1" placeholder="Ask about your Incorta data&hellip; (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button type="submit" id="send" class="btn">Send</button>
+    </div>
+  </form>
+  <script src="/copilot.js"></script>
+</body>
+</html>

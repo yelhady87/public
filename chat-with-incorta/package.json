@@ -1,7 +1,7 @@
 {
   "name": "sample-incorta-oauth",
   "version": "1.0.0",
-  "description": "Sample Node.js app demonstrating OAuth flow with Keycloak and Incorta API",
+  "description": "Sample Node.js app demonstrating OIDC authentication with any identity provider and Incorta API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -14,7 +14,6 @@
   "keywords": [
     "oauth",
     "oidc",
-    "keycloak",
     "incorta"
   ],
   "author": "",

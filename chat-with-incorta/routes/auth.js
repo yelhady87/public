@@ -29,7 +29,7 @@ function generateCodeChallenge(verifier) {
 }
 
 /**
- * Authentication routes for the user-facing OIDC provider (Keycloak).
+ * Authentication routes for the user-facing OIDC provider (any standards-compliant IdP).
  *
  * Runs the Authorization Code + PKCE flow. This router is mounted at the app
  * root (not under /auth): the callback path has to stay exactly
@@ -39,21 +39,21 @@ function generateCodeChallenge(verifier) {
  * (req.session.oidc.provider) and the callback is routed back to its client.
  *
  * @param {object} options
- * @param {object} options.keycloak - KeycloakOIDCClient instance. Its inner
- *   openid-client (`.client`) stays null when Keycloak was not configured or
- *   discovery failed, in which case the Keycloak login routes report 503
+ * @param {object} options.oidc - OIDCProviderClient instance. Its inner
+ *   openid-client (`.client`) stays null when the provider was not configured
+ *   or discovery failed, in which case the login route reports 503
  *   instead of crashing the app.
  */
-function createAuthRouter({ keycloak }) {
+function createAuthRouter({ oidc }) {
   const router = express.Router();
 
   const providers = {
-    keycloak: { idp: keycloak, label: 'Keycloak' },
+    oidc: { idp: oidc, label: oidc.label },
   };
 
   // Kept next to the provider table so a provider and its login path cannot
   // drift apart. The home page links to these, so they are part of the contract.
-  const LOGIN_PATHS = { keycloak: '/login-keycloak' };
+  const LOGIN_PATHS = { oidc: '/login' };
 
   /**
    * Is this provider usable? It needs the wrapper plus a discovered
@@ -82,7 +82,7 @@ function createAuthRouter({ keycloak }) {
       }));
 
   /**
-   * GET /login-keycloak - start the login flow
+   * GET /login - start the login flow
    */
   function startLogin(providerName) {
     const provider = providers[providerName];
@@ -135,7 +135,7 @@ function createAuthRouter({ keycloak }) {
       const { code, state, error, error_description: errorDescription } = req.query;
 
       const providerName =
-        (req.session.oidc && req.session.oidc.provider) || 'keycloak';
+        (req.session.oidc && req.session.oidc.provider) || 'oidc';
       const provider = providers[providerName];
       const idp = provider.idp;
 
@@ -219,7 +219,7 @@ function createAuthRouter({ keycloak }) {
       if (err.name === 'RPError' || err.name === 'OPError') {
         console.error('  (openid-client rejected the response)');
       }
-      // Log WHICH params arrived, not their values. Keycloak omits `iss` from a
+      // Log WHICH params arrived, not their values. some providers omit `iss` from a
       // successful authorization redirect unless the client asked for it (RFC
       // 9207), and openid-client then fails with the unhelpful "iss missing
       // from the response" - seeing "code, session_state, state" and no `iss`
@@ -265,9 +265,10 @@ function createAuthRouter({ keycloak }) {
  * Hint for a missing email claim.
  */
 function missingEmailHint() {
+  const claim = process.env.OIDC_EMAIL_CLAIM || 'email';
   return (
-    'No email claim found in the Keycloak ID token. Set an Email address on the user in Keycloak ' +
-    '(Users > select user > Details > Email) and make sure the `email` client scope is assigned to the client.'
+    `No \`${claim}\` claim found in the ID token. Make sure the user has an email address on their profile ` +
+    'at the identity provider, the `email` scope is granted to the client, and OIDC_EMAIL_CLAIM names the right claim.'
   );
 }
 

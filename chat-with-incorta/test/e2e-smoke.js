@@ -1,5 +1,5 @@
 /**
- * End-to-end smoke test using a mock Keycloak + mock Incorta.
+ * End-to-end smoke test using a mock OIDC provider + mock Incorta.
  *
  * Run with Node 18+ (uses global fetch and JWK export):
  *   node test/e2e-smoke.js
@@ -7,7 +7,7 @@
  * The mock Keycloak issues REAL RS256-signed ID tokens backed by a real
  * JWKS, so openid-client's signature validation is genuinely exercised.
  *
- * Verifies: /login-keycloak redirect -> Keycloak -> /callback code exchange ->
+ * Verifies: /login redirect -> OIDC provider -> /callback code exchange ->
  *           Incorta client-credentials token (with for_user) -> schema list API.
  */
 const http = require('http');
@@ -433,7 +433,15 @@ const incorta = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
-      capturedA2aBody = JSON.parse(body || '{}');
+      const rpc = JSON.parse(body || '{}');
+      // Polled Copilot flow: a non-blocking send, and tasks/get
+      if (
+        rpc.method === 'tasks/get' ||
+        (rpc.method === 'message/send' && !(rpc.params && rpc.params.configuration))
+      ) {
+        return handleCopilotRpc(rpc, req, res);
+      }
+      capturedA2aBody = rpc;
 
       if (failNextChat) {
         failNextChat = false;
@@ -464,7 +472,9 @@ const incorta = http.createServer((req, res) => {
             role: 'agent',
             parts: [{ kind: 'text', text: `Echo: ${capturedA2aBody.params.message.parts[0].text}` }],
             messageId: 'agent-message-1',
-            contextId: capturedA2aBody.params.contextId,
+            // Incorta assigns the conversation id on the first message and the
+            // client echoes it back afterwards
+            contextId: capturedA2aBody.params.contextId || 'ctx-from-incorta',
           },
         },
         { 'trace-id': INCORTA_TRACE_ID }
@@ -475,6 +485,110 @@ const incorta = http.createServer((req, res) => {
 
   json(res, 404, { error: 'not_found' });
 });
+
+// ---- Mock Copilot task flow (non-blocking send + tasks/get) ----
+// The message text picks the script, so one mock covers every case:
+//   (default) submitted -> working (1 step) -> working (2 steps) -> completed
+//   FAIL      -> failed after two polls, error text in status.message
+//   NEEDINPUT -> input-required after two polls
+//   NEVER     -> working forever
+//   RPCERROR  -> a JSON-RPC error object under HTTP 200
+//   NOTASK    -> a reply that is not a task
+const copilotTasks = new Map();
+let copilotSeq = 0;
+let copilotReject401Next = false;
+let capturedCopilotSend = null;
+let capturedCopilotSendHeaders = null;
+const copilotPollAuth = [];
+
+function copilotStep(n) {
+  return {
+    kind: 'message',
+    role: 'agent',
+    metadata: { step_type: 'reasoning_chain', description: `Step ${n}`, status: 'DONE' },
+    parts: [
+      {
+        kind: 'data',
+        data: {
+          title: `Step ${n} title`,
+          status: 'DONE',
+          subtitle: `doing ${n}`,
+          output: ['secret-output'],
+          metrics: { execution_time_ms: 10 * n },
+          error: { message: 'step note', traceback: 'secret-traceback' },
+        },
+      },
+    ],
+  };
+}
+
+function handleCopilotRpc(rpc, req, res) {
+  const headers = { 'trace-id': INCORTA_TRACE_ID };
+
+  if (rpc.method === 'message/send') {
+    capturedCopilotSend = rpc;
+    capturedCopilotSendHeaders = req.headers;
+    const text = rpc.params.message.parts[0].text;
+
+    if (text.includes('RPCERROR')) {
+      return json(res, 200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32603, message: 'boom' } }, headers);
+    }
+    if (text.includes('NOTASK')) {
+      return json(res, 200, { jsonrpc: '2.0', id: rpc.id, result: { kind: 'message', parts: [] } }, headers);
+    }
+
+    copilotSeq += 1;
+    const contextId = rpc.params.contextId || `ctx-${copilotSeq}`;
+    const id = `${contextId}_${copilotSeq}`;
+    copilotTasks.set(id, { contextId, text, polls: 0 });
+    return json(
+      res,
+      200,
+      { jsonrpc: '2.0', id: rpc.id, result: { contextId, id, kind: 'task', status: { state: 'submitted' } } },
+      headers
+    );
+  }
+
+  // tasks/get
+  copilotPollAuth.push(req.headers.authorization);
+  if (copilotReject401Next) {
+    copilotReject401Next = false;
+    return json(res, 401, { message: 'token expired' });
+  }
+
+  const task = copilotTasks.get(rpc.params.id);
+  if (!task) {
+    return json(res, 200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32001, message: 'Task not found' } }, headers);
+  }
+
+  task.polls += 1;
+  const { text, polls } = task;
+  const history = [
+    { kind: 'message', role: 'user', parts: [{ kind: 'text', text }] },
+  ];
+  for (let n = 1; n <= Math.min(polls, 2); n += 1) history.push(copilotStep(n));
+
+  const result = {
+    id: rpc.params.id,
+    contextId: task.contextId,
+    kind: 'task',
+    artifacts: [],
+    history,
+    status: { state: 'working' },
+  };
+  const statusMessage = (t) => ({ kind: 'message', role: 'agent', parts: [{ kind: 'text', text: t }] });
+
+  if (text.includes('FAIL') && polls >= 2) {
+    result.status = { state: 'failed', message: statusMessage('litellm.BadRequestError: Operation not allowed') };
+  } else if (text.includes('NEEDINPUT') && polls >= 2) {
+    result.status = { state: 'input-required', message: statusMessage('Which schema do you mean?') };
+  } else if (!/FAIL|NEEDINPUT|NEVER/.test(text) && polls >= 3) {
+    result.artifacts = [{ artifactId: 'a1', parts: [{ kind: 'text', text: `Answer to: ${text}` }] }];
+    result.status = { state: 'completed', message: statusMessage('Response ready.') };
+  }
+
+  return json(res, 200, { jsonrpc: '2.0', id: rpc.id, result }, headers);
+}
 
 // ---- Mock Keycloak ----
 // Mirrors the two Keycloak behaviors that broke the real login flow:
@@ -630,8 +744,465 @@ let kcTokenCalls = 0;
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// How long to wait for a spawned app to answer /health (250ms per attempt).
+// Raise SMOKE_STARTUP_MS on a slow or heavily loaded machine.
+const STARTUP_ATTEMPTS = Math.ceil((Number(process.env.SMOKE_STARTUP_MS) || 10000) / 250);
+
 /**
- * Chat request construction: dataset parsing, header set, JSON-RPC envelope.
+ * public/copilot.js pollTask(): the polling rules, with a fake clock and a fake
+ * fetch so nothing here waits for real time.
+ */
+async function testCopilotPolling() {
+  const { pollTask } = require('../public/copilot');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'copilot.js'), 'utf8');
+
+  assert.ok(
+    !/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(src),
+    'copilot.js must insert text only, never HTML'
+  );
+
+  // A clock that only moves when the poller sleeps
+  const makeClock = () => {
+    let t = 0;
+    return { now: () => t, sleep: async (ms) => { t += ms; } };
+  };
+  const view = (state, done = false) => ({ state, done });
+
+  // Stops at the first final view; polls never overlap
+  {
+    const clock = makeClock();
+    const seq = [view('working'), view('working'), view('completed', true)];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const seen = [];
+    const out = await pollTask({
+      ...clock,
+      intervalMs: 100,
+      timeoutMs: 10000,
+      fetchView: async () => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await Promise.resolve();
+        inFlight -= 1;
+        return seq.shift();
+      },
+      onView: (v) => seen.push(v.state),
+    });
+    assert.deepStrictEqual(seen, ['working', 'working', 'completed']);
+    assert.strictEqual(out.view.state, 'completed');
+    assert.strictEqual(maxInFlight, 1, 'polls must not overlap');
+    assert.strictEqual(clock.now(), 200, 'sleeps between polls only, not after the last');
+  }
+
+  // Transient errors (network, 5xx) are retried up to 3 times in a row
+  {
+    const clock = makeClock();
+    let calls = 0;
+    const out = await pollTask({
+      ...clock,
+      intervalMs: 10,
+      timeoutMs: 10000,
+      fetchView: async () => {
+        calls += 1;
+        if (calls <= 3) throw Object.assign(new Error('x'), calls === 2 ? { status: 503 } : {});
+        return view('completed', true);
+      },
+      onView: () => {},
+    });
+    assert.strictEqual(out.view.state, 'completed');
+
+    let failures = 0;
+    await assert.rejects(
+      pollTask({
+        ...clock,
+        intervalMs: 10,
+        timeoutMs: 10000,
+        fetchView: async () => { failures += 1; throw new Error('down'); },
+        onView: () => {},
+      }),
+      /down/
+    );
+    assert.strictEqual(failures, 4, 'gives up after 3 retries');
+  }
+
+  // 401 (and any other 4xx) stops at once
+  {
+    let calls = 0;
+    await assert.rejects(
+      pollTask({
+        ...makeClock(),
+        intervalMs: 10,
+        timeoutMs: 10000,
+        fetchView: async () => { calls += 1; throw Object.assign(new Error('no'), { status: 401 }); },
+        onView: () => {},
+      }),
+      (e) => e.status === 401
+    );
+    assert.strictEqual(calls, 1);
+  }
+
+  // Wall-clock timeout
+  {
+    const out = await pollTask({
+      ...makeClock(),
+      intervalMs: 50,
+      timeoutMs: 120,
+      fetchView: async () => view('working'),
+      onView: () => {},
+    });
+    assert.strictEqual(out.timedOut, true);
+  }
+
+  // Cancelling (Retry / New chat) stops quietly, without rendering the stale result
+  {
+    let cancelled = false;
+    let rendered = 0;
+    const out = await pollTask({
+      ...makeClock(),
+      intervalMs: 10,
+      timeoutMs: 10000,
+      isCancelled: () => cancelled,
+      fetchView: async () => { cancelled = true; return view('working'); },
+      onView: () => { rendered += 1; },
+    });
+    assert.strictEqual(out.cancelled, true);
+    assert.strictEqual(rendered, 0);
+  }
+
+  console.log('✓ polling: no overlap, stops at a final state, retries transient errors, times out, cancels');
+}
+
+/**
+ * Runs public/copilot.js against a tiny fake DOM and a scripted fetch, to catch
+ * runtime mistakes in the page code (not just syntax errors): sending, polling,
+ * rendering steps and the answer, the error card with Retry, and New chat.
+ */
+async function testCopilotPageFlow() {
+  class FakeEl {
+    constructor(tag) {
+      this.tag = tag;
+      this.className = '';
+      this.children = [];
+      this.listeners = {};
+      this.attrs = {};
+      this.dataset = {};
+      this.hidden = false;
+      this.disabled = false;
+      this.open = false;
+      this.value = '';
+      this.own = '';
+    }
+    set textContent(v) { this.own = String(v); this.children = []; }
+    get textContent() { return this.own + this.children.map((c) => c.textContent).join(''); }
+    appendChild(c) { this.children.push(c); return c; }
+    replaceChildren() { this.children = []; this.own = ''; }
+    setAttribute(k, v) { this.attrs[k] = v; }
+    addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); }
+    fire(t, ev = {}) { (this.listeners[t] || []).forEach((f) => f({ preventDefault() {}, ...ev })); }
+    scrollIntoView() {}
+    focus() {}
+    find(pred) {
+      const out = [];
+      const walk = (n) => { if (pred(n)) out.push(n); n.children.forEach(walk); };
+      walk(this);
+      return out;
+    }
+  }
+
+  const ids = {};
+  ['transcript', 'form', 'input', 'send', 'newChat'].forEach((id) => (ids[id] = new FakeEl(id)));
+  const body = new FakeEl('body');
+  body.dataset = { pollMs: '1', timeoutMs: '5000' };
+  const document = {
+    body,
+    getElementById: (id) => ids[id],
+    createElement: (tag) => new FakeEl(tag),
+    createTextNode: (text) => { const n = new FakeEl('#text'); n.textContent = text; return n; },
+  };
+
+  // Scripted server
+  const sent = [];
+  const polls = { n: 0 };
+  let nextSend = null; // overrides the next POST /messages response
+  const reply = (status, data) => ({ ok: status < 400, status, json: async () => data });
+  const fetchStub = async (url, options = {}) => {
+    if (options.method === 'POST') {
+      sent.push(JSON.parse(options.body));
+      if (nextSend) { const r = nextSend; nextSend = null; return r; }
+      return reply(200, { taskId: 't1', contextId: 'c1' });
+    }
+    polls.n += 1;
+    const steps = [{ title: 'Looking', status: 'DONE', subtitle: 'around', durationMs: 7 }];
+    return polls.n % 2 === 1
+      ? reply(200, { taskId: 't1', state: 'working', done: false, steps })
+      : reply(200, { taskId: 't1', state: 'completed', done: true, steps, answer: 'the answer', error: null });
+  };
+
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'copilot.js'), 'utf8');
+  require('vm').runInNewContext(src, {
+    document,
+    window: { addEventListener() {} },
+    fetch: fetchStub,
+    setTimeout,
+    AbortController,
+    console,
+  });
+
+  const settle = async (check, what) => {
+    for (let i = 0; i < 400; i += 1) {
+      if (check()) return;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    throw new Error(`timed out waiting for: ${what}\n${ids.transcript.textContent}`);
+  };
+  const ask = (text) => { ids.input.value = text; ids.form.fire('submit'); };
+  const cards = (cls) => ids.transcript.find((n) => n.className === cls);
+
+  // 1. Ask, poll, answer
+  ask('hello');
+  assert.strictEqual(ids.input.disabled, true, 'input is disabled while a task runs');
+  await settle(() => cards('card').length === 1, 'the answer card');
+  assert.strictEqual(cards('card')[0].textContent, 'the answer');
+  assert.ok(ids.transcript.textContent.includes('hello'), 'the user bubble is shown');
+  assert.ok(ids.transcript.textContent.includes('Thought for'), 'the Thoughts header is summarised when done');
+  assert.strictEqual(ids.input.disabled, false, 'input is enabled again');
+  assert.deepStrictEqual(sent[0], { text: 'hello', contextId: null }, 'the first message has no conversation id');
+
+  // 2. The follow-up carries the conversation id the page holds
+  ask('again');
+  await settle(() => cards('card').length === 2, 'second answer');
+  assert.strictEqual(sent[1].contextId, 'c1');
+
+  // 3. An error shows a card with details and Retry; Retry resends and clears it
+  nextSend = reply(502, { error: 'boom', traceId: 'tr-9', details: { why: 'x' } });
+  ask('third');
+  await settle(() => cards('card error').length === 1, 'the error card');
+  const errorCard = cards('card error')[0];
+  assert.strictEqual(errorCard.attrs.role, 'alert');
+  assert.ok(errorCard.textContent.includes('boom'));
+  const buttons = errorCard.find((n) => n.tag === 'button');
+  assert.deepStrictEqual(buttons.map((b) => b.textContent), ['View Error Details', 'Retry']);
+  const detailsPre = errorCard.find((n) => n.tag === 'pre')[0];
+  assert.strictEqual(detailsPre.hidden, true);
+  buttons[0].fire('click');
+  assert.strictEqual(detailsPre.hidden, false, 'View Error Details reveals the details');
+  assert.ok(detailsPre.textContent.includes('tr-9'), 'the trace-id is in the details');
+  buttons[1].fire('click');
+  await settle(() => cards('card error').length === 0 && cards('card').length === 3, 'Retry to succeed');
+  assert.strictEqual(sent[sent.length - 1].text, 'third', 'Retry resends the same message');
+
+  // 4. A 401 asks the user to log in again, with no Retry
+  nextSend = reply(401, { error: 'Not authenticated' });
+  ask('fourth');
+  await settle(() => cards('card error').length === 1, 'the 401 card');
+  assert.ok(cards('card error')[0].textContent.includes('log in again'));
+  assert.deepStrictEqual(
+    cards('card error')[0].find((n) => n.tag === 'button').map((b) => b.textContent),
+    ['View Error Details']
+  );
+
+  // 5. New chat clears the page and starts a fresh conversation
+  ids.newChat.fire('click');
+  assert.strictEqual(ids.transcript.children.length, 0);
+  ask('fresh');
+  await settle(() => cards('card').length === 1, 'answer after New chat');
+  assert.strictEqual(sent[sent.length - 1].contextId, null, 'a new chat has no conversation id');
+
+  console.log('✓ copilot page: send, poll, steps, answer, error card + Retry, 401, New chat (fake DOM)');
+}
+
+/**
+ * Task parsing and request building for the polled Copilot page: pure functions,
+ * checked against shapes condensed from real Incorta responses.
+ */
+function testCopilotLib() {
+  const fx = require('./fixtures/copilot-tasks');
+  const { extractAnswer, toView } = require('../lib/incorta-task-view');
+  const { buildMessagePayload } = require('../lib/incorta-a2a');
+
+  // --- extractAnswer: artifacts win; "Response ready." is never the answer ---
+  assert.strictEqual(extractAnswer(fx.completed), fx.ANSWER_TEXT);
+  assert.strictEqual(extractAnswer({ parts: [{ kind: 'text', text: 'blocking reply' }] }), 'blocking reply');
+  assert.strictEqual(
+    extractAnswer({ message: { parts: [{ kind: 'text', text: 'from message' }] } }),
+    'from message'
+  );
+  assert.strictEqual(extractAnswer({ status: { message: { parts: [{ kind: 'text', text: 'Response ready.' }] } } }), '');
+
+  // --- toView: completed ---
+  const done = toView(fx.completed, 'trace-1');
+  assert.strictEqual(done.state, 'completed');
+  assert.strictEqual(done.done, true);
+  assert.strictEqual(done.answer, fx.ANSWER_TEXT);
+  assert.strictEqual(done.error, null, 'a completed task with failed steps is still an answer');
+  assert.deepStrictEqual(
+    done.steps.map((st) => st.title),
+    ['Understanding the question', 'Discovering available data sources']
+  );
+  assert.deepStrictEqual(done.steps[0], {
+    title: 'Understanding the question',
+    description: 'Understanding the question',
+    status: 'ERROR',
+    subtitle: 'Clarifying the ask',
+    durationMs: 104,
+  });
+  const wire = JSON.stringify(done);
+  assert.ok(!wire.includes('traceback') && !wire.includes('secret.py'), 'no traceback in the view');
+  assert.ok(!wire.includes('Schema discovery failed'), 'step outputs are not forwarded');
+  assert.ok(!wire.includes('Response ready'), 'status.message is not shown');
+
+  // --- toView: working ---
+  const run = toView(fx.working);
+  assert.strictEqual(run.state, 'working');
+  assert.strictEqual(run.done, false);
+  assert.strictEqual(run.steps.length, 1);
+  assert.strictEqual(run.answer, '');
+
+  // --- toView: failed uses status.message, then the last step error ---
+  const bad = toView(fx.failed, 'trace-2');
+  assert.strictEqual(bad.done, true);
+  assert.strictEqual(bad.error.message, 'litellm.BadRequestError: Operation not allowed');
+  assert.strictEqual(bad.error.traceId, 'trace-2');
+  const noText = toView({ ...fx.failed, status: { state: 'failed' } });
+  assert.strictEqual(noText.error.message, 'No relevant tables were found for your question.');
+
+  // --- toView: other states ---
+  assert.strictEqual(toView({ id: 'x', status: { state: 'input-required' } }).done, true);
+  assert.strictEqual(toView({ id: 'x', status: { state: 'submitted' } }).done, false);
+  assert.strictEqual(toView({ id: 'x', status: { state: 'completed' } }).answer, 'No answer returned.');
+  assert.strictEqual(toView(undefined).state, 'unknown');
+
+  // --- request building: blocking option and model key ---
+  const saved = {};
+  const setEnv = (k, v) => {
+    if (!(k in saved)) saved[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  };
+  try {
+    const base = { text: 'hi', messageId: 'm', rpcId: 1 };
+
+    setEnv('INCORTA_A2A_MODEL_KEY', undefined);
+    const blocking = buildMessagePayload(base);
+    assert.deepStrictEqual(blocking.params.configuration, { blocking: true });
+    assert.ok(!('params' in blocking.params.message.metadata.conversation_context.client_context));
+
+    const poll = buildMessagePayload({ ...base, blocking: false });
+    assert.ok(!('configuration' in poll.params), 'a polled message sends no configuration');
+
+    setEnv('INCORTA_A2A_MODEL_KEY', 'claude-opus-5-5');
+    assert.deepStrictEqual(
+      buildMessagePayload(base).params.message.metadata.conversation_context.client_context.params,
+      [{ key: 'model_key', value: 'claude-opus-5-5' }],
+      'model_key is sent when configured, for both modes'
+    );
+    assert.deepStrictEqual(
+      buildMessagePayload({ ...base, blocking: false }).params.message.metadata.conversation_context
+        .client_context.params,
+      [{ key: 'model_key', value: 'claude-opus-5-5' }]
+    );
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+  console.log('✓ task view, answer extraction, blocking option and model_key');
+}
+
+/**
+ * lib/incorta-a2a-client: returns a plain result for 2xx and 4xx/5xx alike
+ * (it must not throw on an error status) and logs both bodies.
+ */
+async function testA2aClient() {
+  const keys = ['INCORTA_BASE_URL', 'INCORTA_TENANT'];
+  const saved = {};
+  keys.forEach((k) => (saved[k] = process.env[k]));
+  process.env.INCORTA_BASE_URL = `http://localhost:${INCORTA_PORT}`;
+  process.env.INCORTA_TENANT = SMOKE_INCORTA_TENANT;
+
+  const logged = [];
+  const origLog = console.log;
+  console.log = (...args) => logged.push(args.join(' '));
+
+  try {
+    const { sendMessage } = require('../lib/incorta-a2a-client');
+    const args = {
+      accessToken: 'incorta-access-token',
+      text: 'unit hello',
+      messageId: 'm-1',
+      contextId: 'c-1',
+      rpcId: 7,
+    };
+
+    const ok = await sendMessage(args);
+    assert.strictEqual(ok.status, 200);
+    assert.strictEqual(ok.traceId, INCORTA_TRACE_ID);
+    assert.strictEqual(ok.payload.id, 7);
+    assert.strictEqual(ok.data.result.parts[0].text, 'Echo: unit hello');
+    assert.ok(ok.url.includes(`/${SMOKE_INCORTA_TENANT}/copilot/a2a/agent/`));
+    assert.ok(Number.isFinite(ok.durationMs));
+
+    failNextChat = true;
+    const failed = await sendMessage(args);
+    assert.strictEqual(failed.status, 500, 'an error status is returned, not thrown');
+    assert.strictEqual(failed.traceId, INCORTA_ERROR_TRACE_ID);
+    assert.ok(String(failed.data.message).includes('INC_05000301'));
+
+    const out = logged.join('\n');
+    assert.ok(out.includes('Incorta A2A request body:') && out.includes('unit hello'));
+    assert.ok(out.includes('Incorta A2A response body (200') && out.includes('Echo: unit hello'));
+    assert.ok(out.includes('Incorta A2A response body (500'), 'error bodies are logged too');
+    assert.ok(!out.includes('incorta-access-token'), 'the bearer token must not be logged');
+  } finally {
+    console.log = origLog;
+    keys.forEach((k) => {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    });
+  }
+  console.log('✓ A2A client returns error statuses without throwing and logs both bodies');
+}
+
+/**
+ * Generic OIDC client settings: label, scopes and the email claim are all
+ * configurable, so the same client works for providers that do not use `email`.
+ */
+function testOidcProviderConfig() {
+  const saved = {};
+  const keys = ['OIDC_EMAIL_CLAIM', 'OIDC_PROVIDER_LABEL', 'OIDC_SCOPES'];
+  keys.forEach((k) => {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  });
+  try {
+    const { OIDCProviderClient } = require('../lib/oidc-provider');
+    const tokenSet = {
+      claims: () => ({ email: 'a@example.com', upn: 'upn@example.com' }),
+    };
+
+    const def = new OIDCProviderClient();
+    assert.strictEqual(def.label, 'SSO', 'label should default to SSO');
+    assert.strictEqual(def.getUserEmail(tokenSet), 'a@example.com');
+    assert.deepStrictEqual(def.scopes, ['openid', 'profile', 'email']);
+
+    process.env.OIDC_EMAIL_CLAIM = 'upn';
+    process.env.OIDC_PROVIDER_LABEL = 'Okta';
+    const custom = new OIDCProviderClient();
+    assert.strictEqual(custom.label, 'Okta');
+    assert.strictEqual(custom.getUserEmail(tokenSet), 'upn@example.com');
+    assert.strictEqual(custom.getUserEmail({ claims: () => null }), null);
+    console.log('✓ OIDC client honours OIDC_PROVIDER_LABEL and OIDC_EMAIL_CLAIM');
+  } finally {
+    keys.forEach((k) => {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    });
+  }
+}
+
+/**
+ * Chat request construction: header set, JSON-RPC envelope.
  *
  * Pure functions, so this needs no server. The header assertions matter most
  * here: the point of the endpoint is that only the API contract and the Bearer
@@ -639,7 +1210,6 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 function testA2aRequestBuilding() {
   const {
-    resolveDatasets,
     buildMessagePayload,
     buildHeaders,
     buildConversationContext,
@@ -667,35 +1237,7 @@ function testA2aRequestBuilding() {
   };
 
   try {
-    // --- datasets: empty means no dataset context, not a broken request ---
-    setEnv({ INCORTA_A2A_DATASETS: '', INCORTA_BASE_URL: 'http://localhost', INCORTA_TENANT: 'demo_keycloak' });
-    assert.deepStrictEqual(
-      resolveDatasets(),
-      [],
-      'an unset INCORTA_A2A_DATASETS should mean no dataset context'
-    );
-
-    // --- datasets: SCHEMA and SCHEMA:TABLE forms ---
-    setEnv({ INCORTA_A2A_DATASETS: 'HR' });
-    assert.deepStrictEqual(resolveDatasets(), [
-      { type: 'business_view', data: { schema_name: 'HR' } },
-    ]);
-
-    setEnv({ INCORTA_A2A_DATASETS: 'HR:Dept_BS, SALES , ' });
-    assert.deepStrictEqual(
-      resolveDatasets(),
-      [
-        { type: 'business_view', data: { schema_name: 'HR', table_name: 'Dept_BS' } },
-        { type: 'business_view', data: { schema_name: 'SALES' } },
-      ],
-      'datasets should parse comma-separated SCHEMA:TABLE pairs and ignore stray commas'
-    );
-
-    // A slash is accepted as the separator too, since it appears in dataset paths
-    setEnv({ INCORTA_A2A_DATASETS: 'HR/Dept_BS' });
-    assert.deepStrictEqual(resolveDatasets(), [
-      { type: 'business_view', data: { schema_name: 'HR', table_name: 'Dept_BS' } },
-    ]);
+    setEnv({ INCORTA_BASE_URL: 'http://localhost', INCORTA_TENANT: 'demo_keycloak' });
 
     // --- headers: only accept, content-type, authorization, x-a2a-extensions ---
     setEnv({ INCORTA_A2A_EXTENSIONS: undefined });
@@ -762,12 +1304,11 @@ function testA2aRequestBuilding() {
     );
 
     // --- conversation context ---
-    setEnv({ INCORTA_A2A_DATASETS: 'HR:Dept_BS', INCORTA_A2A_VERBOSITY: 'detailed' });
+    setEnv({ INCORTA_A2A_VERBOSITY: 'detailed' });
     const ctx = buildConversationContext();
     assert.strictEqual(ctx.client, 'general');
     assert.strictEqual(ctx.client_context.verbosity, 'detailed');
     assert.strictEqual(ctx.client_context.enable_summary, true);
-    assert.strictEqual(ctx.client_context.datasets.length, 1);
     // current_date must be stamped now, not cached, or the agent resolves
     // relative dates ("last quarter") against the wrong day
     assert.ok(
@@ -783,7 +1324,6 @@ function testA2aRequestBuilding() {
     );
 
     // --- JSON-RPC envelope ---
-    setEnv({ INCORTA_A2A_DATASETS: 'HR' });
     const body = buildMessagePayload({
       text: 'hi',
       messageId: 'mid-1',
@@ -792,13 +1332,27 @@ function testA2aRequestBuilding() {
     });
     assert.strictEqual(body.jsonrpc, '2.0');
     assert.strictEqual(body.method, 'message/send');
-    assert.strictEqual(body.blocking, true);
+    assert.ok(!('blocking' in body), 'no top-level blocking flag');
+    assert.deepStrictEqual(
+      body.params.configuration,
+      { blocking: true },
+      'params.configuration should request a blocking call'
+    );
+    assert.deepStrictEqual(
+      Object.keys(body),
+      ['jsonrpc', 'method', 'params', 'id'],
+      'envelope keys should match the Copilot UI request'
+    );
     assert.strictEqual(body.id, 7, 'the JSON-RPC id should be passed through');
     assert.strictEqual(body.params.contextId, 'cid-1');
     assert.strictEqual(body.params.message.messageId, 'mid-1');
     assert.strictEqual(body.params.message.role, 'user');
     assert.strictEqual(body.params.message.kind, 'message');
     assert.deepStrictEqual(body.params.message.parts, [{ kind: 'text', text: 'hi' }]);
+    assert.ok(
+      !('contextId' in buildMessagePayload({ text: 'hi', messageId: 'm', rpcId: 1 }).params),
+      'the first message carries no contextId'
+    );
     assert.ok(
       body.params.message.metadata.conversation_context,
       'the message should carry conversation_context metadata'
@@ -828,7 +1382,7 @@ function testA2aRequestBuilding() {
 
   console.log('✓ A2A request sends only accept/content-type/authorization + extensions');
   console.log('✓ A2A request body is a JSON-RPC message/send envelope');
-  console.log('✓ A2A datasets, extensions, agent name and conversation context are configurable');
+  console.log('✓ A2A extensions, agent name and conversation context are configurable');
 }
 
 // Pure config logic, so it runs before any server is spawned
@@ -839,7 +1393,7 @@ testTokenLogging();
 /**
  * Spawn server.js with the given env overrides, wait for /health, and return
  * `{ app, getLog }`. `unset` names env vars to delete, which matters because the
- * test process inherits a developer's real .env - a stray KEYCLOAK_ISSUER would
+ * test process inherits a developer's real .env - a stray OIDC_ISSUER would
  * make the "Keycloak disabled" case pass for the wrong reason.
  */
 /**
@@ -911,10 +1465,10 @@ function testTokenLogging() {
 
     process.env.LOG_ACCESS_TOKENS = 'true';
     lines.length = 0;
-    logAccessToken('Keycloak', long, { user: 'a@b.com' });
+    logAccessToken('SSO', long, { user: 'a@b.com' });
     const on = lines.join('\n');
     assert.ok(on.includes(long), `enabled must log the raw token: ${on}`);
-    assert.ok(on.includes('Keycloak'), 'label should be present');
+    assert.ok(on.includes('SSO'), 'label should be present');
 
     // --- falsy inputs are ignored rather than printed as "undefined" ---
     lines.length = 0;
@@ -954,7 +1508,7 @@ async function startApp({ port, env = {}, unset = [], isolateEnv = false }) {
   // server.js calls require('dotenv').config(), which reads ./.env relative to
   // ITS OWN cwd and fills in anything missing from childEnv. Deleting a var is
   // therefore not enough to simulate "unconfigured" - dotenv would put the
-  // developer's real KEYCLOAK_* back. Running from a directory with no .env
+  // developer's real OIDC_* back. Running from a directory with no .env
   // makes childEnv the only source of config, which is what these cases need.
   // server.js is referenced by absolute path, so cwd does not affect module
   // resolution.
@@ -974,7 +1528,7 @@ async function startApp({ port, env = {}, unset = [], isolateEnv = false }) {
   child.stderr.on('data', (d) => (log += d.toString()));
 
   let up = false;
-  for (let i = 0; i < 40 && !up; i += 1) {
+  for (let i = 0; i < STARTUP_ATTEMPTS && !up; i += 1) {
     await wait(250);
     try {
       const r = await fetch(`http://localhost:${port}/health`);
@@ -1024,9 +1578,9 @@ async function testLoginButtonVisibility() {
       port,
       env: {
         ...baseEnv,
-        KEYCLOAK_ISSUER: `http://localhost:${KC_PORT}/realms/test`,
-        KEYCLOAK_CLIENT_ID: KC_CLIENT_ID,
-        KEYCLOAK_CLIENT_SECRET: '',
+        OIDC_ISSUER: `http://localhost:${KC_PORT}/realms/test`,
+        OIDC_CLIENT_ID: KC_CLIENT_ID,
+        OIDC_CLIENT_SECRET: '',
       },
       isolateEnv: true,
     });
@@ -1038,7 +1592,7 @@ async function testLoginButtonVisibility() {
       `the Keycloak button expected when Keycloak works. Got: ${JSON.stringify(buttons)}\n${getLog()}`
     );
     assert.ok(
-      buttons.some((b) => b.includes('href="/login-keycloak"') && b.includes('Keycloak')),
+      buttons.some((b) => b.includes('href="/login"') && b.includes('Login with SSO')),
       `Keycloak button expected. Got: ${JSON.stringify(buttons)}`
     );
     console.log('✓ the Keycloak login button shows when Keycloak is configured');
@@ -1046,12 +1600,12 @@ async function testLoginButtonVisibility() {
   }
 
   // Case 2: Keycloak not configured at all -> no buttons. env is cleared
-  // explicitly so an inherited real KEYCLOAK_* cannot mask the behavior.
+  // explicitly so an inherited real OIDC_* cannot mask the behavior.
   {
     const { app, getLog } = await startApp({
       port,
       env: baseEnv,
-      unset: ['KEYCLOAK_ISSUER', 'KEYCLOAK_CLIENT_ID', 'KEYCLOAK_CLIENT_SECRET', 'KEYCLOAK_SCOPES'],
+      unset: ['OIDC_ISSUER', 'OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET', 'OIDC_SCOPES'],
       isolateEnv: true,
     });
     const html = await (await fetch(`http://localhost:${port}/`)).text();
@@ -1062,7 +1616,7 @@ async function testLoginButtonVisibility() {
       `no login button should be offered. Got: ${JSON.stringify(buttons)}\n${getLog()}`
     );
     assert.ok(
-      !html.includes('/login-keycloak'),
+      !html.includes('/login'),
       'the Keycloak button should be absent entirely, not just unlinked'
     );
     assert.ok(
@@ -1073,7 +1627,7 @@ async function testLoginButtonVisibility() {
 
     // The route still exists and still reports 503, so a bookmarked URL is a
     // clear error rather than a silent 404.
-    const kcRoute = await fetch(`http://localhost:${port}/login-keycloak`, {
+    const kcRoute = await fetch(`http://localhost:${port}/login`, {
       redirect: 'manual',
     });
     assert.strictEqual(
@@ -1092,9 +1646,9 @@ async function testLoginButtonVisibility() {
       env: {
         ...baseEnv,
         // Nothing is listening here, so discovery fails at startup
-        KEYCLOAK_ISSUER: 'http://localhost:1/realms/unreachable',
-        KEYCLOAK_CLIENT_ID: KC_CLIENT_ID,
-        KEYCLOAK_CLIENT_SECRET: '',
+        OIDC_ISSUER: 'http://localhost:1/realms/unreachable',
+        OIDC_CLIENT_ID: KC_CLIENT_ID,
+        OIDC_CLIENT_SECRET: '',
       },
       isolateEnv: true,
     });
@@ -1106,7 +1660,7 @@ async function testLoginButtonVisibility() {
       `a failed Keycloak discovery should hide its button. Got: ${JSON.stringify(buttons)}\n${getLog()}`
     );
     assert.ok(
-      getLog().includes('/login-keycloak will return 503'),
+      getLog().includes('/login will return 503'),
       `startup should still warn about the broken Keycloak config. Log:\n${getLog()}`
     );
     console.log('✓ an unreachable Keycloak hides its button instead of linking to a 503');
@@ -1133,10 +1687,11 @@ async function main() {
       INCORTA_BASE_URL: `http://localhost:${INCORTA_PORT}`,
       // The tenant must come from config now, not be hardcoded in the route
       INCORTA_TENANT: SMOKE_INCORTA_TENANT,
-      KEYCLOAK_ISSUER: `http://localhost:${KC_PORT}/realms/test`,
-      KEYCLOAK_CLIENT_ID: KC_CLIENT_ID,
-      KEYCLOAK_CLIENT_SECRET: '',
-      KEYCLOAK_SCOPES: 'openid profile email',
+      INCORTA_A2A_MODEL_KEY: 'test-model',
+      OIDC_ISSUER: `http://localhost:${KC_PORT}/realms/test`,
+      OIDC_CLIENT_ID: KC_CLIENT_ID,
+      OIDC_CLIENT_SECRET: '',
+      OIDC_SCOPES: 'openid profile email',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -1153,7 +1708,7 @@ async function main() {
   process.on('exit', shutdown);
 
   let up = false;
-  for (let i = 0; i < 40 && !up; i += 1) {
+  for (let i = 0; i < STARTUP_ATTEMPTS && !up; i += 1) {
     await wait(250);
     try {
       const r = await fetch(`http://localhost:${APP_PORT}/health`);
@@ -1184,11 +1739,11 @@ async function main() {
   };
   const cookieHeader = () => jar.join('; ');
 
-  const login = await fetch(`http://localhost:${APP_PORT}/login-keycloak`, {
+  const login = await fetch(`http://localhost:${APP_PORT}/login`, {
     redirect: 'manual',
   });
   storeCookies(login);
-  assert.strictEqual(login.status, 302, '/login-keycloak should redirect');
+  assert.strictEqual(login.status, 302, '/login should redirect');
   const authUrl = login.headers.get('location');
   assert.ok(authUrl.includes('/protocol/openid-connect/auth'), 'should redirect to Keycloak authorize');
   const scopeParam = new URL(authUrl).searchParams.get('scope');
@@ -1199,7 +1754,7 @@ async function main() {
   );
   assert.ok(authUrl.includes('code_challenge='), 'should send a PKCE challenge');
   assert.ok(authUrl.includes('code_challenge_method=S256'), 'should use S256 PKCE');
-  console.log('✓ /login-keycloak redirects to Keycloak with scopes openid profile email + PKCE');
+  console.log('✓ /login redirects to Keycloak with scopes openid profile email + PKCE');
 
   // A code_challenge was sent on authorize, so the token request MUST carry a
   // matching code_verifier.
@@ -1255,7 +1810,7 @@ async function main() {
   const meBody = await me.json();
   assert.strictEqual(meBody.authenticated, true, 'session should be authenticated');
   assert.strictEqual(meBody.user.email, 'bob@example.com', 'email claim should be captured');
-  assert.strictEqual(meBody.user.provider, 'keycloak', 'session should record the provider');
+  assert.strictEqual(meBody.user.provider, 'oidc', 'session should record the provider');
   console.log(`✓ /me reports authenticated user: ${meBody.user.email}`);
 
   // 6. Home page shows the logged-in state
@@ -1264,7 +1819,7 @@ async function main() {
   });
   const homeHtml = await home.text();
   assert.ok(homeHtml.includes('bob@example.com'), 'home page should show the email');
-  assert.ok(!homeHtml.includes('Login with Keycloak'), 'home page should not show login button');
+  assert.ok(!homeHtml.includes('Login with SSO'), 'home page should not show login button');
   assert.ok(homeHtml.includes('Chat with Incorta Copilot'), 'home page should show the chat window');
   assert.ok(
     homeHtml.includes("/api/incorta/chat"),
@@ -1366,7 +1921,13 @@ async function main() {
   // JSON-RPC envelope, matching the documented request
   assert.strictEqual(capturedA2aBody.jsonrpc, '2.0');
   assert.strictEqual(capturedA2aBody.method, 'message/send');
-  assert.strictEqual(capturedA2aBody.blocking, true);
+  assert.ok(!('blocking' in capturedA2aBody), 'no top-level blocking flag');
+  assert.deepStrictEqual(
+    capturedA2aBody.params.configuration,
+    { blocking: true },
+    'params.configuration.blocking should be sent'
+  );
+  assert.ok(!('contextId' in capturedA2aBody.params), 'first message carries no contextId');
   assert.deepStrictEqual(capturedA2aBody.params.message.parts, [
     { kind: 'text', text: 'hi' },
   ]);
@@ -1386,6 +1947,18 @@ async function main() {
   );
   console.log('✓ chat posts a JSON-RPC message/send with only the Incorta Bearer token');
 
+  // Request and response bodies are logged for debugging; the bearer token is
+  // not part of either body and must stay out of the log.
+  assert.ok(
+    appLog.includes('Incorta A2A request body:') && appLog.includes('"method": "message/send"'),
+    `A2A request body should be logged. Log:\n${appLog}`
+  );
+  assert.ok(
+    appLog.includes('Incorta A2A response body (200') && appLog.includes('Echo: hi'),
+    `A2A response body should be logged. Log:\n${appLog}`
+  );
+  console.log('✓ A2A request and response bodies are logged');
+
   // The conversation id must persist across messages, or the agent treats every
   // message as a brand-new conversation and loses the thread.
   const second = await fetch(`http://localhost:${APP_PORT}/api/incorta/chat`, {
@@ -1398,6 +1971,11 @@ async function main() {
     secondBody.contextId,
     chatBody.contextId,
     'consecutive messages should share one Incorta conversation'
+  );
+  assert.strictEqual(
+    capturedA2aBody.params.contextId,
+    chatBody.contextId,
+    'follow-up messages should send the conversation id Incorta assigned'
   );
   assert.ok(
     capturedA2aBody.id !== chatBody.reply.id,
@@ -1442,8 +2020,8 @@ async function main() {
 
   // 7b. replyText() is what makes the chat usable: the agent's reply can land
   // under several shapes depending on which output extensions the server applied,
-  // so it has to find the text in any of them and fall back to raw JSON rather
-  // than rendering an empty bubble. Extracted from the served page and actually
+  // so it has to find the text in any of them. It shows the reply text only,
+  // never the raw JSON. Extracted from the served page and actually
   // executed, so this tests the shipped code and not a copy of it.
   const replyOf = makeReplyTextRunner(homeHtml);
   assert.strictEqual(
@@ -1458,21 +2036,42 @@ async function main() {
   );
   assert.strictEqual(replyOf({ result: { text: 'from text' } }), 'from text');
   assert.strictEqual(
-    replyOf({ result: { artifacts: [{ name: 'artifact one' }] } }),
+    replyOf({
+      result: {
+        artifacts: [{ parts: [{ kind: 'text', text: 'the real answer' }] }],
+        status: { state: 'completed', message: { parts: [{ kind: 'text', text: 'Response ready.' }] } },
+      },
+    }),
+    'the real answer',
+    'a finished task shows its artifacts, not the "Response ready." status note'
+  );
+  assert.strictEqual(
+    replyOf({ result: { status: { message: { parts: [{ kind: 'text', text: 'from status' }] } } } }),
+    'from status',
+    'should read the text out of result.status.message.parts'
+  );
+  assert.strictEqual(
+    replyOf({ result: { artifacts: [{ parts: [{ kind: 'text', text: 'artifact one' }] }] } }),
     'artifact one',
-    'should fall back to artifact text'
+    'should read the text out of artifact parts'
+  );
+  assert.strictEqual(
+    replyOf({ result: { parts: [{ kind: 'data', data: { a: 1 } }, { kind: 'text', text: 'only text' }] } }),
+    'only text',
+    'non-text parts should be ignored'
   );
   assert.strictEqual(
     replyOf({ error: { code: -32603, message: 'internal error' } }),
     'Error -32603: internal error',
     'a JSON-RPC error object should render readably, not as [object Object]'
   );
-  // An unrecognized shape falls back to the JSON so the user sees the payload
-  // instead of an empty bubble.
+  // An unrecognized shape shows a short notice, never the raw JSON
+  const unknown = replyOf({ result: { somethingNew: 'shape drift' } });
   assert.ok(
-    replyOf({ result: { somethingNew: 'shape drift' } }).includes('shape drift'),
-    'an unknown response shape should fall back to the raw JSON'
+    !unknown.includes('shape drift') && unknown.length > 0,
+    `an unknown response shape should not dump raw JSON, got: ${unknown}`
   );
+  assert.ok(!homeHtml.includes('Raw JSON-RPC response'), 'no raw JSON panel in the chat window');
   console.log('✓ chat reply rendering handles every JSON-RPC result shape');
 
   assertInlineScriptParses(homeHtml);
@@ -1554,7 +2153,7 @@ async function main() {
     `Incorta token should be logged in masked form:\n${appLog}`
   );
   assert.ok(
-    /🔒 Keycloak access token: /.test(appLog),
+    /🔒 SSO access token: /.test(appLog),
     `IdP access token should be logged in masked form:\n${appLog}`
   );
   console.log('✓ access tokens are logged masked by default (Incorta + IdP)');
@@ -1607,6 +2206,130 @@ async function main() {
   assert.strictEqual(badState.status, 400, 'callback with bad state should be rejected');
   console.log('✓ callback rejects a mismatched state (CSRF protection)');
 
+  // 10b. Polled Copilot page and API
+  {
+    const base = `http://localhost:${APP_PORT}`;
+    const authed = { cookie: cookieHeader() };
+    const jsonHeaders = { ...authed, 'Content-Type': 'application/json' };
+    const send = (body, headers = jsonHeaders) =>
+      fetch(`${base}/api/incorta/copilot/messages`, {
+        method: 'POST',
+        headers,
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      });
+    const poll = async (taskId) => {
+      const r = await fetch(`${base}/api/incorta/copilot/tasks/${encodeURIComponent(taskId)}`, { headers: authed });
+      return { status: r.status, text: await r.clone().text(), body: await r.json() };
+    };
+    /** Poll a task until it is done; returns every view seen */
+    const pollToEnd = async (taskId) => {
+      const views = [];
+      for (let i = 0; i < 10; i += 1) {
+        const { body } = await poll(taskId);
+        views.push(body);
+        if (body.done) return views;
+      }
+      throw new Error(`task ${taskId} never finished: ${JSON.stringify(views)}`);
+    };
+
+    // The page and its script
+    const noLogin = await fetch(`${base}/copilot`, { redirect: 'manual' });
+    assert.strictEqual(noLogin.status, 302, 'a logged-out /copilot should redirect');
+    assert.strictEqual(new URL(noLogin.headers.get('location'), base).pathname, '/');
+    const page = await fetch(`${base}/copilot`, { headers: authed });
+    const pageHtml = await page.text();
+    assert.strictEqual(page.status, 200);
+    assert.ok(pageHtml.includes('src="/copilot.js"') && pageHtml.includes('id="transcript"'));
+    assert.ok(/data-poll-ms="\d+"/.test(pageHtml) && /data-timeout-ms="\d+"/.test(pageHtml), 'poll settings are filled in');
+    assert.ok(!pageHtml.includes('__POLL_MS__'), 'no placeholder left behind');
+    const script = await fetch(`${base}/copilot.js`);
+    const scriptText = await script.text();
+    assert.strictEqual(script.status, 200);
+    new (require('vm').Script)(scriptText); // throws on a syntax error
+    const homeAgain = await (await fetch(`${base}/`, { headers: authed })).text();
+    assert.ok(homeAgain.includes('href="/copilot"'), 'the home page links to /copilot');
+    console.log('✓ /copilot page: login redirect, script served, settings filled in, linked from home');
+
+    // Input checks
+    assert.strictEqual((await fetch(`${base}/api/incorta/copilot/messages`, { method: 'POST' })).status, 401);
+    assert.strictEqual((await send('hi', { ...authed, 'Content-Type': 'text/plain' })).status, 415, 'non-JSON is rejected');
+    assert.strictEqual((await send({ text: '   ' })).status, 400, 'empty text');
+    assert.strictEqual((await send({ text: 'hi', contextId: 'bad id!' })).status, 400, 'bad contextId');
+    assert.strictEqual((await send({ text: 'x'.repeat(9000) })).status, 400, 'too long');
+    assert.strictEqual((await poll('bad id!')).status, 400, 'bad task id');
+    console.log('✓ copilot API validates content type, text, contextId and task id');
+
+    // A task, polled from start to finish
+    const started = await (await send({ text: 'hello' })).json();
+    assert.ok(started.taskId && started.contextId, 'send returns the task and conversation ids');
+    assert.ok(!('configuration' in capturedCopilotSend.params), 'a polled send has no configuration block');
+    assert.ok(!('contextId' in capturedCopilotSend.params), 'the first message carries no contextId');
+    assert.strictEqual(capturedCopilotSend.id, 1);
+    assert.deepStrictEqual(
+      capturedCopilotSend.params.message.metadata.conversation_context.client_context.params,
+      [{ key: 'model_key', value: 'test-model' }],
+      'the configured model key is sent'
+    );
+    assert.strictEqual(capturedCopilotSendHeaders.authorization, 'Bearer incorta-access-token');
+
+    const views = await pollToEnd(started.taskId);
+    assert.deepStrictEqual(views.map((v) => v.state), ['working', 'working', 'completed']);
+    assert.deepStrictEqual(views.map((v) => v.steps.length), [1, 2, 2], 'steps grow while working');
+    assert.strictEqual(views[1].steps[1].title, 'Step 2 title');
+    assert.strictEqual(views[2].answer, 'Answer to: hello', 'the answer comes from the artifacts');
+    assert.strictEqual(views[2].error, null);
+    const wire = JSON.stringify(views);
+    for (const secret of ['secret-output', 'secret-traceback', 'incorta-access-token', 'Response ready']) {
+      assert.ok(!wire.includes(secret), `"${secret}" must not reach the browser`);
+    }
+    assert.strictEqual(
+      appLog.split(`task ${started.taskId}: working`).length - 1,
+      1,
+      'a poll is logged only when the state changes'
+    );
+    assert.ok(appLog.includes(`task ${started.taskId} final body`), 'the final body is logged');
+    console.log('✓ copilot task: submitted -> working (steps grow) -> completed, answer from artifacts, nothing leaked');
+
+    // A follow-up carries the conversation id the browser holds
+    await send({ text: 'and then?', contextId: started.contextId });
+    assert.strictEqual(capturedCopilotSend.params.contextId, started.contextId);
+    console.log('✓ follow-up message carries the conversation id');
+
+    // Failed, input-required, and upstream problems
+    const failed = await (await send({ text: 'FAIL please' })).json();
+    const failedView = (await pollToEnd(failed.taskId)).pop();
+    assert.strictEqual(failedView.state, 'failed');
+    assert.strictEqual(failedView.error.message, 'litellm.BadRequestError: Operation not allowed');
+    assert.strictEqual(failedView.error.traceId, INCORTA_TRACE_ID);
+    assert.strictEqual(failedView.answer, '');
+
+    const needInput = await (await send({ text: 'NEEDINPUT' })).json();
+    const needView = (await pollToEnd(needInput.taskId)).pop();
+    assert.strictEqual(needView.state, 'input-required');
+    assert.strictEqual(needView.done, true, 'a task waiting for the user is not polled forever');
+    assert.strictEqual(needView.error.message, 'Which schema do you mean?');
+
+    const rpcError = await send({ text: 'RPCERROR' });
+    assert.strictEqual(rpcError.status, 502, 'a JSON-RPC error under HTTP 200 is an error');
+    assert.strictEqual((await rpcError.json()).error, 'boom');
+    assert.strictEqual((await send({ text: 'NOTASK' })).status, 502, 'a reply without a task id is an error');
+    const unknown = await poll('no-such-task');
+    assert.strictEqual(unknown.status, 502);
+    assert.strictEqual(unknown.body.error, 'Task not found');
+    console.log('✓ copilot failed / input-required tasks and upstream errors are reported');
+
+    // Incorta rejects the token mid-task: refresh once and retry
+    const refreshTask = await (await send({ text: 'hello again' })).json();
+    const tokenCallsBefore = incortaTokenCalls;
+    const authBefore = copilotPollAuth.length;
+    copilotReject401Next = true;
+    const afterRefresh = await poll(refreshTask.taskId);
+    assert.strictEqual(afterRefresh.status, 200, 'the poll succeeds after a token refresh');
+    assert.strictEqual(incortaTokenCalls, tokenCallsBefore + 1, 'exactly one fresh token was fetched');
+    assert.strictEqual(copilotPollAuth.length - authBefore, 2, 'the poll was retried once');
+    console.log('✓ an expired token mid-task is refreshed and the poll retried once');
+  }
+
   // 11. Logout
   const logout = await fetch(`http://localhost:${APP_PORT}/logout`, {
     redirect: 'manual',
@@ -1622,6 +2345,11 @@ async function main() {
 
   // Run last: the login-button cases stop the main app and reuse its port, so
   // every assertion that needs the main app has to come first.
+  testOidcProviderConfig();
+  testCopilotLib();
+  await testCopilotPolling();
+  await testCopilotPageFlow();
+  await testA2aClient();
   await stopApp(app);
   await testLoginButtonVisibility();
 

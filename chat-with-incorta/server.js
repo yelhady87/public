@@ -4,10 +4,11 @@ const express = require('express');
 const session = require('express-session');
 const crypto = require('crypto');
 
-const { KeycloakOIDCClient } = require('./lib/oidc-keycloak');
+const { OIDCProviderClient } = require('./lib/oidc-provider');
 const { IncortaOIDCClient } = require('./lib/oidc-incorta');
 const { createAuthRouter } = require('./routes/auth');
 const { createIncortaRouter } = require('./routes/incorta');
+const { createCopilotRouter, copilotPage, copilotScript } = require('./routes/copilot');
 
 const PORT = process.env.APP_PORT || 3000;
 const BASE_URL = process.env.APP_BASE_URL || `http://localhost:${PORT}`;
@@ -38,22 +39,24 @@ app.use(
   })
 );
 
-const keycloak = new KeycloakOIDCClient();
+const oidc = new OIDCProviderClient();
 const incorta = new IncortaOIDCClient();
 
-const PROVIDER_LABELS = { keycloak: 'Keycloak' };
 
 // Mount the routers first so the home page can ask the auth router which
 // providers are actually usable, rather than keeping its own copy of that check.
-const authRouter = createAuthRouter({ keycloak });
+const authRouter = createAuthRouter({ oidc });
 app.use('/', authRouter);
 app.use('/api/incorta', createIncortaRouter(incorta));
+app.use('/api/incorta/copilot', createCopilotRouter(incorta));
+app.get('/copilot', copilotPage);
+app.get('/copilot.js', copilotScript);
 
 /**
  * Login buttons for the providers that are usable right now.
  *
  * A provider whose discovery failed is omitted rather than rendered as a dead
- * button: /login-keycloak answers 503 in that case, so linking to it would just
+ * button: /login answers 503 in that case, so linking to it would just
  * hand the user an error. The message below the buttons covers the case where
  * nothing is available at all.
  */
@@ -63,8 +66,8 @@ function renderLoginButtons() {
   if (!available.length) {
     return (
       '<p class="muted">No login provider is configured. Set ' +
-      '<code>KEYCLOAK_ISSUER</code>, <code>KEYCLOAK_CLIENT_ID</code> and ' +
-      '<code>KEYCLOAK_CLIENT_SECRET</code> in <code>.env</code>, then restart the app.</p>'
+      '<code>OIDC_ISSUER</code>, <code>OIDC_CLIENT_ID</code> and ' +
+      '<code>OIDC_CLIENT_SECRET</code> in <code>.env</code>, then restart the app.</p>'
     );
   }
 
@@ -129,11 +132,10 @@ app.get('/', (req, res) => {
     user
       ? `<div class="card">
            <p><strong>Authenticated as:</strong> ${escapeHtml(user.email)}</p>
-           <p class="muted">via ${escapeHtml(
-             PROVIDER_LABELS[user.provider] || 'Keycloak'
-           )}</p>
+           <p class="muted">via ${escapeHtml(oidc.label)}</p>
            <p class="muted">sub: ${escapeHtml(user.sub || 'n/a')}</p>
            <button class="btn" id="callBtn" onclick="callIncorta()">Call Incorta API (schema list)</button>
+           <a class="btn secondary" href="/copilot" style="margin-left:8px; text-decoration:none;">Copilot chat (polled)</a>
            <a class="btn secondary" href="/logout" style="margin-left:8px; text-decoration:none;">Logout</a>
          </div>
          <div id="output"></div>
@@ -207,41 +209,44 @@ app.get('/', (req, res) => {
 
            // --- Incorta Copilot chat ---
 
-            // The A2A response is a JSON-RPC envelope; the agent's actual reply
-            // can sit under several shapes depending on which output extensions
-            // the server applied, so collect text from all of them rather than
-            // assuming one. Falls back to the raw JSON so a response shape
-            // change shows the user the payload instead of an empty bubble.
+            // The A2A response is a JSON-RPC envelope; the agent's reply can sit
+            // under several shapes depending on which output extensions the
+            // server applied. Only the reply text is shown, never the raw JSON
+            // (the full response body is logged by the server).
             function replyText(data) {
+              // Text of the text parts only; other part kinds are ignored.
+              function partsText(parts) {
+                if (!Array.isArray(parts)) return '';
+                return parts.map(function (p) {
+                  return p && typeof p.text === 'string' ? p.text : '';
+                }).filter(Boolean).join('\\n');
+              }
+
               if (typeof data === 'string') return data;
               if (!data || typeof data !== 'object') return '';
-
-              var candidates = [];
 
               // JSON-RPC 2.0 puts the result in \`result\`; a bare object with no
               // envelope means the server answered without wrapping.
               var result = data.result || data;
+              var message = result.message;
+              var statusMessage = result.status && result.status.message;
 
-              candidates.push(result.text);
-              candidates.push(result.message && result.message.text);
-
-              // MessagePart shape: an array of parts each carrying text.
-              if (Array.isArray(result.parts)) {
-                candidates.push(result.parts.map(function (p) {
-                  return p && p.text ? p.text : '';
-                }).join('\\n'));
+              // The answer of a finished task is in its artifacts; its
+              // status.message is only a note such as "Response ready.", so it
+              // comes last.
+              var candidates = [];
+              if (Array.isArray(result.artifacts)) {
+                candidates.push(result.artifacts.map(function (a) {
+                  return a ? (typeof a.text === 'string' ? a.text : partsText(a.parts)) : '';
+                }).filter(Boolean).join('\\n'));
               }
-
-              // Artifacts / structured output that may hold prose.
-              if (result.artifacts) {
-                candidates.push(
-                  result.artifacts.map(function (a) {
-                    if (!a) return '';
-                    if (typeof a.text === 'string') return a.text;
-                    return a.name || a.description || '';
-                  }).join('\\n')
-                );
-              }
+              candidates.push(
+                result.text,
+                message && message.text,
+                partsText(result.parts),
+                partsText(message && message.parts),
+                partsText(statusMessage && statusMessage.parts)
+              );
 
               for (var i = 0; i < candidates.length; i++) {
                 if (typeof candidates[i] === 'string' && candidates[i].trim()) {
@@ -255,30 +260,18 @@ app.get('/', (req, res) => {
                   (data.error.message || JSON.stringify(data.error));
               }
 
-              return JSON.stringify(data, null, 2);
+              return 'The agent replied without any text.';
             }
 
-            function addBubble(text, who, raw) {
+            function addBubble(text, who) {
               var log = document.getElementById('chatLog');
               var el = document.createElement('div');
               el.className = 'bubble ' + who;
               // Agent output is rendered as text, never HTML: it contains
-              // table/HTML fragments from the datasets, and interpreting it
+              // table/HTML fragments from Incorta data, and interpreting it
               // would let Incorta content inject markup into this page.
               el.textContent = text;
               log.appendChild(el);
-
-              if (raw) {
-                var details = document.createElement('details');
-                details.className = 'muted';
-                var summary = document.createElement('summary');
-                summary.textContent = 'Raw JSON-RPC response';
-                var pre = document.createElement('pre');
-                pre.textContent = raw;
-                details.appendChild(summary);
-                details.appendChild(pre);
-                log.appendChild(details);
-              }
               log.scrollTop = log.scrollHeight;
             }
 
@@ -328,11 +321,7 @@ app.get('/', (req, res) => {
                   return false;
                 }
 
-                addBubble(
-                  replyText(data.reply),
-                  'agent',
-                  JSON.stringify(data.reply, null, 2)
-                );
+                addBubble(replyText(data.reply), 'agent');
               } catch (e) {
                 var log2 = document.getElementById('chatLog');
                 var p2 = log2.querySelector('.agent.pending');
@@ -401,7 +390,7 @@ function escapeHtml(str) {
 }
 
 // The auth router is mounted at the root so that its /callback path matches
-// the redirect URI registered in Keycloak. (Mounted earlier, above the home
+// the redirect URI registered with the identity provider. (Mounted earlier, above the home
 // page, so the page can query its provider list.)
 
 /**
@@ -425,16 +414,16 @@ app.use((err, req, res, next) => {
  * then listen.
  */
 async function start() {
-  // A missing KEYCLOAK_* entry or an unreachable server downgrades
-  // /login-keycloak to 503 instead of taking the whole app down.
-  if (!process.env.KEYCLOAK_ISSUER || !process.env.KEYCLOAK_CLIENT_ID) {
-    console.log('⚠ Keycloak not configured - /login-keycloak is disabled');
+  // A missing OIDC_* entry or an unreachable server downgrades /login to 503
+  // instead of taking the whole app down.
+  if (!process.env.OIDC_ISSUER || !process.env.OIDC_CLIENT_ID) {
+    console.log('⚠ OIDC not configured - /login is disabled');
   } else {
     try {
-      await keycloak.init();
+      await oidc.init();
     } catch (err) {
-      console.error('⚠ Failed to initialize Keycloak OIDC client:', err.message);
-      console.error('  /login-keycloak will return 503 until this is fixed');
+      console.error('⚠ Failed to initialize OIDC client:', err.message);
+      console.error('  /login will return 503 until this is fixed');
     }
   }
 
@@ -450,11 +439,11 @@ async function start() {
     console.log('');
     console.log(`✓ Server running at ${BASE_URL}`);
     console.log('');
-    console.log('  Redirect URI to register with Keycloak:');
+    console.log('  Redirect URI to register with your identity provider:');
     console.log(`    ${BASE_URL}/callback`);
     console.log('');
     console.log('  Login route:');
-    console.log(`    ${BASE_URL}/login-keycloak`);
+    console.log(`    ${BASE_URL}/login`);
     console.log('');
   });
 }

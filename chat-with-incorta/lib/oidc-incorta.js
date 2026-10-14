@@ -102,6 +102,9 @@ class IncortaOIDCClient {
     body.append('client_secret', this.clientSecret);
     body.append('for_user', userEmail);
 
+    // URL only: the credentials and for_user travel in the body, never logged
+    console.log(`→ Incorta API request: POST ${tokenEndpoint}`);
+
     const response = await axios.post(tokenEndpoint, body.toString(), {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',

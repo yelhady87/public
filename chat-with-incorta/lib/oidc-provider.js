@@ -1,26 +1,30 @@
 const { Issuer } = require('openid-client');
 
 /**
- * Keycloak OIDC client configuration
+ * Generic OpenID Connect client for user authentication.
  *
- * Uses the Authorization Code + PKCE flow and mounts on `${APP_BASE_URL}/callback`.
+ * Works with any standards-compliant provider (Keycloak, Okta, Auth0, Entra ID,
+ * ...) via OIDC discovery. Uses the Authorization Code + PKCE flow and mounts
+ * on `${APP_BASE_URL}/callback`.
  */
 const APP_BASE_URL =
   process.env.APP_BASE_URL ||
   `http://localhost:${process.env.APP_PORT || 3000}`;
 
-class KeycloakOIDCClient {
+class OIDCProviderClient {
   constructor() {
-    this.issuer = process.env.KEYCLOAK_ISSUER;
-    this.clientId = process.env.KEYCLOAK_CLIENT_ID;
-    // Empty for a public client. Keycloak's discovery advertises the "none"
-    // token endpoint auth method, which sends client_id and nothing else -
-    // exactly what a public client needs. Sending an empty client_secret would
-    // still authenticate the request as confidential and get rejected.
-    this.clientSecret = process.env.KEYCLOAK_CLIENT_SECRET || undefined;
-    this.scopes = (process.env.KEYCLOAK_SCOPES || 'openid profile email').split(
-      ' '
-    );
+    this.issuer = process.env.OIDC_ISSUER;
+    this.clientId = process.env.OIDC_CLIENT_ID;
+    // Empty for a public client. The "none" token endpoint auth method sends
+    // client_id and nothing else - exactly what a public client needs. Sending
+    // an empty client_secret would still authenticate the request as
+    // confidential and get rejected.
+    this.clientSecret = process.env.OIDC_CLIENT_SECRET || undefined;
+    this.scopes = (process.env.OIDC_SCOPES || 'openid profile email').split(' ');
+    // Shown on the login button and in logs
+    this.label = process.env.OIDC_PROVIDER_LABEL || 'SSO';
+    // Claim that carries the user's email; becomes `for_user` for Incorta
+    this.emailClaim = process.env.OIDC_EMAIL_CLAIM || 'email';
     this.redirectUri = `${APP_BASE_URL}/callback`;
     this.client = null;
   }
@@ -31,7 +35,7 @@ class KeycloakOIDCClient {
   async init() {
     if (!this.issuer || !this.clientId) {
       throw new Error(
-        'Keycloak configuration missing. Please set KEYCLOAK_ISSUER and KEYCLOAK_CLIENT_ID in .env'
+        'OIDC configuration missing. Please set OIDC_ISSUER and OIDC_CLIENT_ID in .env'
       );
     }
 
@@ -48,15 +52,14 @@ class KeycloakOIDCClient {
     // (openid-client/lib/helpers/client.js, case 'none').
     //
     // Note this is set unconditionally rather than only when the issuer
-    // advertises 'none', because Keycloak does NOT list 'none' for a public
-    // client. Verified against Keycloak 25, realm incorta, for the public
-    // client remote_schema_browser:
+    // advertises 'none', because some providers do NOT list 'none' for a public
+    // client. Verified against Keycloak 25, realm incorta, for a public client:
     //   token_endpoint_auth_methods_supported = ['private_key_jwt',
     //     'client_secret_basic', 'client_secret_post', 'tls_client_auth',
     //     'client_secret_jwt']
     // That is inaccurate per RFC 8414 (which says to advertise 'none' when
     // supported), and gating on it would break public-client logins entirely.
-    // Keycloak accepts public-client token requests without it.
+    // Such providers accept public-client token requests without it.
     this.client = new issuer.Client({
       client_id: this.clientId,
       client_secret: this.clientSecret,
@@ -67,7 +70,7 @@ class KeycloakOIDCClient {
         : 'none',
     });
 
-    console.log(`✓ Keycloak OIDC client initialized (issuer: ${this.issuer})`);
+    console.log(`✓ ${this.label} OIDC client initialized (issuer: ${this.issuer})`);
     return this.client;
   }
 
@@ -85,8 +88,9 @@ class KeycloakOIDCClient {
 
     // RFC 9207 (OAuth 2.0 Authorization Server Issuer Identification).
     //
-    // Keycloak advertises `authorization_response_iss_parameter_supported:
-    // true` in its discovery document, and openid-client v5 reacts to that by
+    // Providers such as Keycloak advertise
+    // `authorization_response_iss_parameter_supported: true` in their discovery
+    // document, and openid-client v5 reacts to that by
     // REQUIRING `iss` on the authorization response:
     //
     //   if ('iss' in params) { ...validate it... }
@@ -98,10 +102,10 @@ class KeycloakOIDCClient {
     //
     // But openid-client v5 never sends `iss` on the authorization REQUEST, and
     // per RFC 9207 a server only returns `iss` in the response when the client
-    // asked for it. Keycloak does not get this automatically, so the flow fails with
+    // asked for it. Such a provider does not get this automatically, so the flow fails with
     // "Authentication failed: iss missing from the response".
     //
-    // Sending it explicitly satisfies both sides: Keycloak echoes it back, and
+    // Sending it explicitly satisfies both sides: the provider echoes it back, and
     // openid-client validates that the echo matches its discovered issuer.
     //
     // Both halves are required. Sending `iss` without passing the whole callback
@@ -133,7 +137,7 @@ class KeycloakOIDCClient {
     // Two consequences, both hit in practice:
     //
     //   1. Passing `{ code, state }` by hand drops the RFC 9207 `iss` that
-    //      Keycloak echoes back. Because Keycloak advertises
+    //      the provider echoes back. Because it advertises
     //      `authorization_response_iss_parameter_supported`, callback() then
     //      treats the dropped `iss` as absent and throws
     //      "iss missing from the response" - even though the redirect clearly
@@ -142,7 +146,7 @@ class KeycloakOIDCClient {
     //      `state`, `session_state` and any `error`.
     //
     //   2. Putting code_verifier in `parameters` instead of `checks` drops it
-    //      the same way, and Keycloak rejects the exchange with
+    //      the same way, and the provider rejects the exchange with
     //      "Invalid parameter: code_verifier".
     //
     // openid-client also validates the ID token signature, issuer, audience,
@@ -156,18 +160,19 @@ class KeycloakOIDCClient {
   }
 
   /**
-   * Extract user email from the ID token.
+   * Extract user email from the ID token (claim set by OIDC_EMAIL_CLAIM).
    *
-   * Keycloak only includes `email` when the user actually has an Email value
-   * on their profile, so this can legitimately come back undefined. Callers
+   * Providers only include `email` when the user actually has one on their
+   * profile, so this can legitimately come back undefined. Callers
    * surface that as a configuration error rather than silently falling back to
    * a username, because the email is what Incorta receives as `for_user`.
    */
   getUserEmail(tokenSet) {
-    if (!tokenSet.claims()) {
+    const claims = tokenSet.claims();
+    if (!claims) {
       return null;
     }
-    return tokenSet.claims().email;
+    return claims[this.emailClaim];
   }
 
   /**
@@ -178,4 +183,4 @@ class KeycloakOIDCClient {
   }
 }
 
-module.exports = { KeycloakOIDCClient };
+module.exports = { OIDCProviderClient };

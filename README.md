@@ -6,6 +6,8 @@ Publicly shareable Incorta samples. This branch (`sample-chat-app`) holds one pr
 
 A small Node.js / Express web app that shows how to build a user-aware chat experience on top of Incorta:
 
+> **Sample code, not production-ready.** This project is meant for learning and experimentation. It has not been hardened for production use, so review and secure it before reusing any of it in a real deployment.
+
 - **User login** through any OpenID Connect provider (Keycloak, Okta, Auth0, Microsoft Entra ID), using Authorization Code + PKCE. Incorta also supports SAML 2.0 based SSO; this sample uses OIDC because it is the easier one to set up.
 - **Incorta access on the user's behalf**: the app gets an Incorta token with the Client Credentials flow and passes the field mapped to Incorta's `loginName` (e.g. the user's email) as `for_user`. The identity provider's token is never sent to Incorta.
 - **Two chat experiences** backed by Incorta's Copilot agent-to-agent (A2A) API:

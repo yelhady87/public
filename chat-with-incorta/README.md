@@ -1,4 +1,4 @@
-# Sample Incorta OAuth App
+# Chat With Incorta
 
 A sample Node.js web application demonstrating OAuth 2.0 / OpenID Connect authentication flow with any OpenID Connect identity provider (Keycloak, Okta, Auth0, Entra ID, ...) and Incorta.
 

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Chat With Incorta Architecture",
+    "output": ".archify/architecture-chat-with-incorta-20261025-231346/chat-with-incorta.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:yelhady87/public.git",
+      "link_mode": "local-only",
+      "revision": "c467b505f3a193801ff5adeee320343458a67a2c"
+    }
+  },
+  "components": [
+    { "id": "browser", "type": "frontend", "label": "Browser", "sublabel": "home chat + /copilot", "pos": [40, 240], "size": [150, 64],
+      "sources": [{ "path": "chat-with-incorta/server.js", "line": 93, "end_line": 93, "label": "home page" }, { "path": "chat-with-incorta/public/copilot.js", "line": 1, "label": "copilot UI" }] },
+    { "id": "authr", "type": "backend", "label": "Auth routes", "sublabel": "/login /callback /me", "pos": [330, 60], "size": [150, 64], "tag": "PKCE",
+      "sources": [{ "path": "chat-with-incorta/routes/auth.js", "line": 133, "end_line": 133, "label": "/callback" }, { "path": "chat-with-incorta/lib/oidc-provider.js", "line": 85, "end_line": 86, "label": "code_challenge" }] },
+    { "id": "chat", "type": "backend", "label": "Chat + schema routes", "sublabel": "/api/incorta", "pos": [330, 240], "size": [150, 64],
+      "sources": [{ "path": "chat-with-incorta/routes/incorta.js", "line": 148, "end_line": 152, "label": "route mounts" }] },
+    { "id": "cop", "type": "backend", "label": "Copilot routes", "sublabel": "messages + task poll", "pos": [330, 400], "size": [150, 64],
+      "sources": [{ "path": "chat-with-incorta/routes/copilot.js", "line": 77, "label": "POST /messages" }, { "path": "chat-with-incorta/routes/copilot.js", "line": 140, "label": "GET /tasks/:id" }] },
+    { "id": "tokclient", "type": "security", "label": "Incorta OIDC client", "sublabel": "token cached per user", "pos": [640, 240], "size": [150, 64],
+      "sources": [{ "path": "chat-with-incorta/lib/oidc-incorta.js", "line": 97, "end_line": 108, "label": "client_credentials" }, { "path": "chat-with-incorta/lib/incorta-session.js", "line": 27, "label": "getIncortaToken" }] },
+    { "id": "apiclient", "type": "backend", "label": "Incorta API clients", "sublabel": "schemas + A2A", "pos": [640, 400], "size": [150, 64],
+      "sources": [{ "path": "chat-with-incorta/lib/incorta-schemas.js", "line": 25, "end_line": 31, "label": "schema/list" }, { "path": "chat-with-incorta/lib/incorta-a2a-client.js", "line": 42, "label": "message/send" }, { "path": "chat-with-incorta/lib/incorta-a2a-client.js", "line": 116, "label": "tasks/get" }] },
+    { "id": "idp", "type": "security", "label": "OIDC identity provider", "sublabel": "Keycloak / Okta / Entra", "pos": [1010, 60], "size": [150, 64], "tag": "user login",
+      "sources": [{ "path": "chat-with-incorta/lib/oidc-provider.js", "line": 42, "label": "Issuer.discover" }] },
+    { "id": "tokep", "type": "security", "label": "Incorta token endpoint", "sublabel": "OIDC discovery", "pos": [1010, 240], "size": [150, 64],
+      "sources": [{ "path": "chat-with-incorta/lib/oidc-incorta.js", "line": 72, "label": "Issuer.discover" }] },
+    { "id": "restapi", "type": "cloud", "label": "Incorta REST API", "sublabel": "schema/list", "pos": [1010, 370], "size": [150, 64],
+      "sources": [{ "path": "chat-with-incorta/lib/incorta-schemas.js", "line": 25, "end_line": 28, "label": "schema/list" }] },
+    { "id": "a2a", "type": "cloud", "label": "Copilot A2A agent", "sublabel": "JSON-RPC", "pos": [1010, 490], "size": [150, 64],
+      "sources": [{ "path": "chat-with-incorta/lib/incorta-a2a-client.js", "line": 42, "label": "axios.post" }] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Express app (chat-with-incorta)", "wraps": ["authr", "chat", "cop", "tokclient", "apiclient"] },
+    { "kind": "region", "label": "Incorta cluster", "wraps": ["tokep", "restapi", "a2a"] }
+  ],
+  "connections": [
+    { "id": "browser-login", "from": "browser", "to": "authr", "label": "login redirect", "variant": "emphasis" },
+    { "id": "browser-chat", "from": "browser", "to": "chat", "label": "chat" },
+    { "id": "browser-copilot", "from": "browser", "to": "cop", "label": "poll" },
+    { "id": "auth-idp", "from": "authr", "to": "idp", "label": "discovery + code/PKCE exchange", "variant": "security" },
+    { "id": "chat-token", "from": "chat", "to": "tokclient", "label": "get token", "variant": "security" },
+    { "id": "token-incorta", "from": "tokclient", "to": "tokep", "label": "client_credentials + for_user", "variant": "security" },
+    { "id": "chat-api", "from": "chat", "to": "apiclient", "label": "chat, schemas" },
+    { "id": "cop-api", "from": "cop", "to": "apiclient", "label": "send, poll" },
+    { "id": "api-rest", "from": "apiclient", "to": "restapi", "label": "REST + Bearer" },
+    { "id": "api-a2a", "from": "apiclient", "to": "a2a", "label": "message/send, tasks/get" }
+  ],
+  "cards": [
+    { "dot": "violet", "title": "Two-step auth", "items": ["User signs in at any OIDC provider (Auth Code + PKCE)", "App then gets an Incorta token via client credentials, passing the field mapped to Incorta loginName (e.g. email) as for_user", "The IdP token is never sent to Incorta"] },
+    { "dot": "cyan", "title": "Chat modes", "items": ["Home page: blocking chat via /api/incorta/chat", "/copilot: send a message, then poll the task and show agent thoughts"] },
+    { "dot": "amber", "title": "Scope", "items": ["Copilot routes also fetch the Incorta token through the same client", "Sessions are in-memory express-session, 1 hour"] }
+  ]
+}
